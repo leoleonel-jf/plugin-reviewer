@@ -1175,6 +1175,56 @@ class RedactionThroughParseTests(ProbeTestCase):
         self.assertEqual(value["command"], {"redacted": True, "digest": canonical_digest("npx")})
 
 
+class MarkerShapedFileObjectTests(ProbeTestCase):
+    """Atlas review of PR 41, P2: provenance, not shape, in navigation too.
+
+    PR 40 made `withhold_text` tell a marker `redact` made from a file's
+    object with the same two keys. Enumeration and the pointer walk still
+    decided by shape, so such an object was summarised as one opaque item and
+    a key that exists under it resolved as `not_present`/`pointer_unresolved`
+    -- a present setting recorded as absent.
+    """
+
+    SHAPED = {"redacted": True, "digest": "sha256:" + "a" * 64}
+
+    def probe(self, **extra: object) -> dict:
+        probe = {
+            "kind": "setting",
+            "path": "$USER_CONFIG/settings.json",
+            "parse": "json",
+        }
+        probe.update(extra)
+        return probe
+
+    def write_document(self, document: object) -> None:
+        self.write(self.user_config / "settings.json", json.dumps(document))
+
+    def test_a_marker_shaped_file_object_is_enumerated(self) -> None:
+        self.write_document({"obj": self.SHAPED})
+        items = run_probe(self.probe(pointer="/obj"), self.roots, [])
+        self.assertEqual([item["name"] for item in items], ["digest", "redacted"])
+        self.assertTrue(all(item["state"] == "present" for item in items))
+
+    def test_a_key_under_a_marker_shaped_file_object_resolves(self) -> None:
+        self.write_document({"obj": self.SHAPED})
+        items = run_probe(self.probe(pointer="/obj/redacted"), self.roots, [])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["state"], "present")
+        self.assertNotIn("reason", items[0]["attributes"])
+
+    def test_a_marker_redaction_made_stays_opaque(self) -> None:
+        # The control: the same walk must still stop at a real marker.
+        self.write_document({"env": {"API_TOKEN": "PLAINTEXT-3e19b0"}})
+        items = run_probe(self.probe(pointer="/env/API_TOKEN"), self.roots, ["env"])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["state"], "not_present")
+        self.assertEqual(items[0]["attributes"]["reason"], "pointer_unresolved")
+        items = run_probe(self.probe(pointer="/env"), self.roots, ["env"])
+        self.assertEqual(len(items), 1)
+        self.assertNotIn("API_TOKEN", json.dumps(items))
+        self.assertNotIn("PLAINTEXT-3e19b0", json.dumps(items))
+
+
 class WithheldTextTests(unittest.TestCase):
     """`withhold_text`: no string a file held is copied, whatever key it sat under.
 
@@ -1221,10 +1271,13 @@ class WithheldTextTests(unittest.TestCase):
 
         A marker's `digest` is a string, and `redact` runs first. Walking into
         it would replace the one thing a later comparison needs with a digest
-        of a digest.
+        of a digest. The marker is the one `redact` made: since 0.13.0 a
+        hand-built object of the same shape is walked like any other
+        (`MarkerShapedInputTestCase` in `test_update.py`).
         """
-        marker = {"redacted": True, "digest": canonical_digest("s3cr3t")}
-        self.assertEqual(withhold_text({"token": marker}), {"token": marker})
+        redacted = redact({"token": "s3cr3t"}, ["token"])
+        expected = {"token": {"redacted": True, "digest": canonical_digest("s3cr3t")}}
+        self.assertEqual(withhold_text(redacted), expected)
 
     def test_equal_text_has_an_equal_digest_and_different_text_does_not(self) -> None:
         one = withhold_text({"a": "same", "b": "same", "c": "other"})

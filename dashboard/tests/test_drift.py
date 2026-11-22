@@ -335,6 +335,18 @@ class PointerRecheckTests(DriftTestCase):
         state, reason = classify_item(item, self.roots)
         self.assertEqual((state, reason), ("DRIFTED", "appeared"))
 
+    def test_a_key_appearing_under_a_marker_shaped_object_is_drifted(self) -> None:
+        # Atlas review of PR 41, P2: a file's object shaped like a marker is
+        # not one. A recorded absence under it must turn DRIFTED when the key
+        # is there, or the false absence is confirmed on every drift run.
+        self.write(
+            self.user_config / "settings.json",
+            '{"obj": {"redacted": true, "digest": "sha256:' + "a" * 64 + '"}}\n',
+        )
+        item = self.pointer_item(pointer="/obj/digest")
+        state, reason = classify_item(item, self.roots)
+        self.assertEqual((state, reason), ("DRIFTED", "appeared"))
+
     def test_a_pointer_recheck_with_the_file_gone_is_in_place(self) -> None:
         # No file at all certainly holds an in-file absence.
         state, reason = classify_item(self.pointer_item(), self.roots)
