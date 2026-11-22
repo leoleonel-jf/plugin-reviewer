@@ -374,20 +374,24 @@ def _chain_command(*, ledger: Path, head: bool, seal: bool) -> int:
     if sealed:
         _rows, candidate_verdict = verify_chain(candidate)
         if candidate_verdict != INTACT:
-            first_chained = next(
-                (row["position"] for row in rows if row["reason"] is None), None
+            # Every unsealed record with a sealed one after it is what sealing
+            # would re-index: those before the first link and those in a gap
+            # between two links alike.
+            last_chained = max(
+                (row["position"] for row in rows if row["reason"] is None),
+                default=None,
             )
             stranded = [
                 row
                 for row in rows
                 if row["reason"] == "unchained"
-                and first_chained is not None
-                and row["position"] < first_chained
+                and last_chained is not None
+                and row["position"] < last_chained
             ]
             for row in stranded:
                 print(
                     f"{ledger}: records[{row['position']}] {row['id']!r} has no "
-                    "chain and comes before the sealed records",
+                    "chain and comes before a sealed record",
                     file=sys.stderr,
                 )
             print(

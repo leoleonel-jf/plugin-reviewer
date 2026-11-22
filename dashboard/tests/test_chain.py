@@ -537,6 +537,28 @@ class SealNeverBreaksTheChainTests(ChainCliTestCase):
         self.assertEqual(code, 2, err)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_a_gap_inside_the_sealed_run_is_named_in_the_refusal(self) -> None:
+        """Atlas review of PR 41, P3: the diagnostic named only records
+        before the FIRST sealed one, so an unsealed record between two intact
+        links was refused with no ID. The ledger here enters `PARTIAL`, not
+        `BROKEN`, so it is the new guard that answers, not the old one."""
+        document = self.ledger_of(self.materials(2))
+        seal_ledger(document)
+        document["records"].insert(1, record("MAT-2026-002"))
+        document["sequences"]["MAT"] = 3
+        self.assertEqual(verify_chain(document)[1], "PARTIAL")
+        path = self.write(document)
+        before = path.read_bytes()
+        _, head_before, _ = self.run_cli("chain", str(path), "--head")
+        code, _out, err = self.run_cli("chain", str(path), "--seal")
+        self.assertEqual(code, 2, err)
+        self.assertIn("'MAT-2026-002'", err)
+        self.assertNotIn("'MAT-2026-000'", err)
+        self.assertNotIn("'MAT-2026-001'", err)
+        self.assertEqual(path.read_bytes(), before)
+        _, head_after, _ = self.run_cli("chain", str(path), "--head")
+        self.assertEqual(head_after, head_before)
+
     def test_a_first_seal_chains_every_record(self) -> None:
         path = self.write(self.ledger_of(self.materials(3)))
         code, _out, err = self.run_cli("chain", str(path), "--seal")

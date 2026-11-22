@@ -699,12 +699,14 @@ def _is_marker(value: object) -> bool:
     Checked so a pointer aimed into a redacted subtree is not enumerated into
     two items called `redacted` and `digest`, which would read as configuration
     the file does not contain.
+
+    Provenance, never shape, as in `withhold_text`: a file's own object with
+    the same two keys is configuration, so it is enumerated and walked like
+    any other. Deciding by shape recorded a key present under it as
+    `pointer_unresolved`, and `drift` confirmed the false absence (Atlas
+    review of PR 41).
     """
-    return (
-        isinstance(value, dict)
-        and set(value) == {"redacted", "digest"}
-        and value.get("redacted") is True
-    )
+    return isinstance(value, _Marker)
 
 
 def _jsonable(value: object) -> object:
