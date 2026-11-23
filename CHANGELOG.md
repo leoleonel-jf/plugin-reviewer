@@ -2,6 +2,47 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.14.0 - 2026-11-23
+
+Five medium and low findings of the independent review of 2026-11-20 where a report came back
+clean without being so: a Skill `drift` did not see, a server `lock --check` did not miss, a
+duplicate `verify` let through, a configuration file nobody could parse, a dashboard the browser
+could not read. Pull requests 43 to 45.
+
+- **`drift` asks a glob again** (finding 5). Every item a glob probe produces carries the pattern
+  in `attributes.glob`, and `drift` expands it once more: a path it yields now that the baseline
+  does not hold is one row, `DRIFTED`, `appeared`. Before, a second Skill beside one that was
+  captured exited `0` with no row for it. A match that went away is still that item's `MISSING`,
+  never a second row. **What changes for you:** a baseline captured before 0.14.0 holds the
+  matches and not the pattern; the report lists those patterns in the baseline's new
+  `unenumerated` field and names them on stderr, without moving the exit code. Capture a new
+  baseline to close it;
+- **`lock` identifies an entry by its name too** (finding 6). Two MCP servers in one
+  `config.toml` were one comparison key, so taking one out gave `lock --check` exit `0`. Pins
+  always carried `name`, so a pin written before 0.14.0 compares by the same key. One identity held
+  twice, in the baseline or in the lockfile, is refused as a tool error naming it;
+- **one id, one baseline** (finding 7). `verify` reports a baseline id held twice, within a ledger
+  or across the ledgers given, and a baseline id a record also holds, naming both holders. `lock`
+  refuses `--from` or `--check` on an id more than one baseline holds, where before it pinned the
+  first. **What changes for you:** a ledger that already holds such a duplicate now fails `verify`,
+  `build` and `update`;
+- **a file a parser could not read is a finding** (finding 9). `parse_failed` names the probe's
+  kind and the file; `parse_unavailable` is a TOML file on an interpreter without `tomllib`. Both
+  exit `1` and `update --strict` refuses to append, where before an incomplete `config.toml` gave
+  `findings: []` and a baseline without its servers. A key the file does not have is still an
+  ordinary absence. **What changes for you:** on Python 3.10 a scan whose adapter parses an
+  existing TOML file now exits `1`;
+- **NaN and infinities stay out of the JSON** (finding 15). A capture stores them as their text,
+  `"nan"`, `"inf"` or `"-inf"`; `build` shows one found in an older ledger the same way, says so on
+  stderr and leaves the ledger untouched. Before, `threshold = nan` produced a dashboard whose data
+  `JSON.parse` refused, with `build` exiting `0`.
+
+New fields, all optional and additive: the item attribute `glob`, the drift report's
+`baselines[].unenumerated`, and the finding codes `parse_failed` and `parse_unavailable`. No
+identifier, label or required field changed; a ledger written by 0.13.0 verifies under 0.14.0
+unless it holds a duplicate baseline id. Each guard is proved by ablation, in new classes in
+`test_drift.py`, `test_lock.py`, `test_dashboard.py`, `test_update.py` and `test_build.py`.
+
 ## 0.13.0 - 2026-11-21
 
 The four high findings of the independent review of 2026-11-20, and one low one. Each made a
