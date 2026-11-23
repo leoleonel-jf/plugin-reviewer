@@ -7,7 +7,7 @@ All notable changes to this project are documented in this file.
 Five medium and low findings of the independent review of 2026-11-20 where a report came back
 clean without being so: a Skill `drift` did not see, a server `lock --check` did not miss, a
 duplicate `verify` let through, a configuration file nobody could parse, a dashboard the browser
-could not read. Pull requests 43 to 45.
+could not read. Pull requests 43 to 45, and 47 for the review of the release.
 
 - **`drift` asks a glob again** (finding 5). Every item a glob probe produces carries the pattern
   in `attributes.glob`, and `drift` expands it once more: a path it yields now that the baseline
