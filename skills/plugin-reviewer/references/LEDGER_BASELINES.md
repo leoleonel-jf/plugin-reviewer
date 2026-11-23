@@ -177,8 +177,10 @@ error — a client with no MCP servers configured has no `mcpServers` key, and t
 record that it looked. A file that will not parse is `present`, with its digest and a stable
 `parse_error`; a `toml` probe under an interpreter without `tomllib` is `present`, with its digest and
 `parse_unavailable`, never a crash and never a pretence that the file held nothing. Both are also
-findings of the run, `parse_failed` and `parse_unavailable`, so the exit code is `1` and
-`update --strict` refuses to append ([LEDGER.md](LEDGER.md)).
+findings of the run, `parse_failed` and `parse_unavailable` (from 0.14.0), each naming the probe's
+kind and the file, so the exit code is `1` and `update --strict` refuses to append
+([LEDGER.md](LEDGER.md)). A key the file does not have is an ordinary verified absence and no
+finding.
 
 `scope` is recorded and never resolved. It names the layer an item came from — the shipped adapters
 use `user`, `project`, `system`, and `managed`. `scan` computes no precedence winner from it;
