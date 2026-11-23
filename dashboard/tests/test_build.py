@@ -1126,7 +1126,10 @@ class NonFiniteNumberTests(unittest.TestCase):
         )
 
     def server_values(self, ledger: Path) -> dict:
-        document = _strict_json(ledger.read_text(encoding="utf-8"))
+        try:
+            document = _strict_json(ledger.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            self.fail(f"the ledger is not strict JSON: {exc}")
         return {
             item["name"]: item["attributes"]["value"]
             for item in document["baselines"][0]["items"]
