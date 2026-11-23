@@ -537,3 +537,43 @@ class AmbiguousBaselineTests(LockCliTestCase):
         )
         self.assertEqual(code, 2)
         self.assertIn("BASE-2026-000", stderr)
+
+
+class FrozenPinTests(unittest.TestCase):
+    """A pin exactly as the 0.13.0 writer laid it out still compares clean.
+
+    0.13.0 sorted entries by `(kind, scope, anchor)` only, so two servers at
+    one anchor kept the baseline's order: `beta` before `alpha` here. Written
+    out literally rather than produced by this version's writer (Eve, 0.14.0).
+    """
+
+    def test_a_0_13_0_pin_with_two_servers_at_one_anchor_checks_clean(self) -> None:
+        document = ledger(items=[server("beta"), server("alpha"), item("skill", "one")])
+        entry = {
+            "anchor": SHARED,
+            "digest": "sha256:" + "c" * 64,
+            "kind": "mcp-server",
+            "scope": "user",
+            "state": "present",
+        }
+        frozen = {
+            "adapter_version": 2,
+            "client": "claude-code",
+            "entries": [
+                {**entry, "name": "beta"},
+                {**entry, "name": "alpha"},
+                {
+                    "anchor": "$USER_CONFIG/one",
+                    "digest": "sha256:" + "a" * 64,
+                    "kind": "skill",
+                    "name": "one",
+                    "scope": "user",
+                    "state": "present",
+                },
+            ],
+            "generated_from": "BASE-2026-000",
+            "lock_version": 1,
+            "platform": "win32",
+        }
+        rows, code = check_lock(frozen, document, lockable=LOCKABLE_KINDS)
+        self.assertEqual((rows, code), ([], 0))

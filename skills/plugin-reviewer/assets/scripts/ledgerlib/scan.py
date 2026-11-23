@@ -514,13 +514,17 @@ def _probe_one(
         return [_item(probe, name=name, anchor=anchor, state="present",
                       reason="not_regular_file", portable=portable)]
 
+    fmt = _parse_format(probe)
     try:
         digest = file_digest(resolved)
     except (OSError, ValueError, MemoryError):
+        # A `parse` probe that cannot read its file has read nothing it was
+        # meant to: `parse_error` makes that a finding of the run, as it is
+        # when the read fails inside the parser (Eve's review of 0.14.0).
         return [_item(probe, name=name, anchor=anchor, state="present",
-                      reason="unreadable", portable=portable)]
+                      reason="unreadable", portable=portable,
+                      parse_error="unreadable" if fmt is not None else None)]
 
-    fmt = _parse_format(probe)
     if fmt is None:
         return [_item(probe, name=name, anchor=anchor, state="present",
                       digest=digest, portable=portable)]
@@ -1071,12 +1075,17 @@ def _parse_findings(items: Sequence[dict]) -> list[dict[str, str]]:
         kind, anchor = item.get("kind"), item.get("anchor")
         error = attributes.get("parse_error")
         if isinstance(error, str):
+            recorded = (
+                "the file's digest is recorded and what it declares is not"
+                if item.get("digest") is not None
+                else "neither the file's digest nor what it declares is recorded"
+            )
             _add_finding(
                 findings,
                 FINDING_PARSE_FAILED,
-                f"the {kind} probe could not parse {anchor} ({error}): the "
-                "file's digest is recorded and what it declares is not, so "
-                f"no {kind} from it is in this baseline, present or absent",
+                f"the {kind} probe could not parse {anchor} ({error}): "
+                f"{recorded}, so no {kind} from it is in this baseline, "
+                "present or absent",
             )
         unavailable = attributes.get("parse_unavailable")
         if isinstance(unavailable, str):

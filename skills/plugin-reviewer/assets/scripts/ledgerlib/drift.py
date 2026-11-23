@@ -59,6 +59,7 @@ from ledgerlib.paths import (
 from ledgerlib.scan import (
     BUNDLED_ADAPTERS,
     _leaf,
+    _within,
     _probe_target,
     _resolve_pointer,
     redact,
@@ -365,10 +366,17 @@ def _glob_additions(
 ) -> tuple[list[dict], list[tuple[str, str]], set[str]]:
     """Ask every recorded glob again and return the paths it did not have.
 
-    Returns `(rows, problems, recorded)`. `rows` are the matches the pattern
-    yields now and the baseline does not hold, each `DRIFTED` / `appeared`;
-    `problems` pairs a pattern that could not be expanded with the reason;
-    `recorded` is every pattern the baseline says it enumerated.
+    Returns `(rows, problems, recorded)`. `rows` are the matches a pattern
+    yields now that the baseline does not hold, each `DRIFTED` / `appeared`,
+    plus one `UNVERIFIABLE` row per probe whose pattern now reaches outside
+    its own anchor; `problems` pairs a pattern that could not be expanded
+    with the reason; `recorded` is every pattern the baseline says it
+    enumerated.
+
+    A probe is the pattern with the kind and scope its items carry, so one
+    pattern serving two probes is asked once for each, and a new path is new
+    when its `(kind, scope, anchor)` is nowhere in the baseline: two
+    overlapping patterns of one probe report it once, not twice.
 
     A pattern whose only item is its own recorded absence (`anchor` equal to
     the pattern) is not expanded here: `_classify_absent_pattern` already
@@ -378,34 +386,45 @@ def _glob_additions(
 
     The pattern is ledger content and goes through `check_glob` first, as in
     `_classify_absent_pattern`. Matches are tested for existence only, never
-    opened: the stored form comes from `anchor_path`, the function `scan`
-    used, so a path recorded then compares equal to the same path now.
+    opened. Each one is held to the boundary `scan` holds it to: it must
+    resolve inside the anchor the pattern names, not merely inside some
+    anchor. A match that does not is not an addition and its path is not
+    reported; the row names the pattern and the reason, and a new capture
+    records the refusal (Eve's review of 0.14.0).
     """
-    by_pattern: dict[str, dict] = {}
+    groups: dict[tuple, dict] = {}
     recorded: set[str] = set()
+    identities: set[tuple] = set()
     for item in items:
         if not isinstance(item, dict):
             continue
         attributes = item.get("attributes")
-        pattern = attributes.get("glob") if isinstance(attributes, dict) else None
+        attributes = attributes if isinstance(attributes, dict) else {}
+        scope = attributes.get("scope")
+        scope = scope if isinstance(scope, str) else None
+        kind = item.get("kind")
+        anchor = item.get("anchor")
+        if isinstance(anchor, str):
+            # `repr` because `kind` is ledger content and may not be hashable.
+            identities.add((repr(kind), scope, anchor))
+        pattern = attributes.get("glob")
         if not isinstance(pattern, str) or not pattern.strip():
             continue
         recorded.add(pattern)
-        group = by_pattern.setdefault(
-            pattern, {"anchors": set(), "kind": item.get("kind"), "scope": None}
+        group = groups.setdefault(
+            (pattern, repr(kind), repr(scope)),
+            {"pattern": pattern, "kind": kind, "scope": scope, "matched": False},
         )
-        scope = attributes.get("scope")
-        if isinstance(scope, str) and group["scope"] is None:
-            group["scope"] = scope
-        anchor = item.get("anchor")
         if isinstance(anchor, str) and anchor != pattern:
-            group["anchors"].add(anchor)
+            group["matched"] = True
 
     rows: list[dict] = []
     problems: list[tuple[str, str]] = []
-    for pattern in sorted(by_pattern):
-        group = by_pattern[pattern]
-        if not group["anchors"]:
+    emitted: set[tuple] = set()
+    for key in sorted(groups):
+        group = groups[key]
+        pattern, kind, scope = group["pattern"], group["kind"], group["scope"]
+        if not group["matched"]:
             continue
         try:
             check_glob(pattern)
@@ -427,6 +446,7 @@ def _glob_additions(
             problems.append((pattern, "glob_failed"))
             continue
         found: set[str] = set()
+        refused: str | None = None
         for match in matches:
             try:
                 stored, _portable = anchor_path(match, roots)
@@ -434,18 +454,46 @@ def _glob_additions(
                 # `scan` records a refused match under its absolute form, so
                 # that is the form that compares equal here.
                 stored = str(match)
+            if (repr(kind), scope, stored) in identities:
+                continue
+            try:
+                resolved = resolve_anchored(stored, roots)
+                if not _within(resolved, root):
+                    raise PathSafetyError(
+                        "path resolves outside the anchor its probe named",
+                        reason="path_resolves_outside_anchor",
+                    )
+            except PathSafetyError as exc:
+                refused = refused or exc.reason
+                continue
             found.add(stored)
-        for anchor in sorted(found - group["anchors"]):
+        for anchor in sorted(found):
+            if (repr(kind), scope, anchor) in emitted:
+                continue
+            emitted.add((repr(kind), scope, anchor))
             rows.append(
                 {
-                    "kind": group["kind"],
+                    "kind": kind,
                     "name": _leaf(anchor),
                     "anchor": anchor,
                     "path": resolved_path(anchor, roots),
-                    "scope": group["scope"],
+                    "scope": scope,
                     "recorded_state": None,
                     "state": DRIFTED,
                     "reason": "appeared",
+                }
+            )
+        if refused is not None:
+            rows.append(
+                {
+                    "kind": kind,
+                    "name": pattern,
+                    "anchor": pattern,
+                    "path": None,
+                    "scope": scope,
+                    "recorded_state": None,
+                    "state": UNVERIFIABLE,
+                    "reason": refused,
                 }
             )
     return rows, problems, recorded

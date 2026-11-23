@@ -102,7 +102,10 @@ nothing, and for that item the file appearing is exactly the drift it looks like
 A glob that matched something is asked again. Every item a glob probe produced carries the
 pattern in `attributes.glob` (from 0.14.0), and `drift` expands it once more: a path it yields
 now that the baseline does not hold is one row, `DRIFTED`, `appeared`, beside the recorded
-matches, which keep their own states. A match that went away is that item's `MISSING`, never a
+matches, which keep their own states. A match is held to the anchor its pattern names, as `scan`
+holds it: one that resolves outside it, into another anchor or none, is one `UNVERIFIABLE` row
+naming the pattern and the reason, never the path it reached. A new path is new once, by kind,
+scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the
 report lists those patterns in the baseline's `unenumerated` and says so on stderr, without
