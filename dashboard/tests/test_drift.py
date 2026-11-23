@@ -1417,3 +1417,129 @@ class ResolvedPathReportTests(DriftReportTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlobEnumerationTests(DriftCliTestCase):
+    """A glob probe that already had matches is re-enumerated, not just revisited.
+
+    Finding 5 of the 2026-11-20 review: `scan` stores the individual paths a
+    glob matched, and `drift` revisited only those, so a second Skill under a
+    pattern that already matched one was never reported. Every test captures
+    through `update ledger` and classifies through `drift`, the two commands a
+    user runs, so the attribute that carries the pattern is exercised by the
+    writer that records it and the reader that consumes it.
+    """
+
+    PATTERN = "$USER_CONFIG/skills/*/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": self.PATTERN}
+        ]
+        return document
+
+    def skill(self, name: str) -> Path:
+        return self.write(
+            self.user_config / "skills" / name / "SKILL.md", f"# {name}\n"
+        )
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update",
+            str(ledger),
+            "ledger",
+            "--adapter",
+            str(self.adapter_path),
+            "--project",
+            str(self.tmp),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift(self, ledger: Path) -> tuple[int, dict, str]:
+        code, stdout, stderr = self.run_cli(*self.drift_arguments(ledger))
+        return code, json.loads(stdout), stderr
+
+    def rows(self, report: dict) -> list[dict]:
+        return [row for entry in report["baselines"] for row in entry["items"]]
+
+    def test_drift_detects_second_skill_matching_existing_glob(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        self.skill("two")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        by_anchor: dict[str, list[dict]] = {}
+        for row in self.rows(report):
+            by_anchor.setdefault(row["anchor"], []).append(row)
+        two = by_anchor.get("$USER_CONFIG/skills/two/SKILL.md", [])
+        self.assertEqual(len(two), 1, by_anchor)
+        self.assertEqual(two[0]["state"], "DRIFTED")
+        self.assertEqual(two[0]["reason"], "appeared")
+        self.assertEqual(two[0]["kind"], "skill")
+        one = by_anchor["$USER_CONFIG/skills/one/SKILL.md"]
+        self.assertEqual([row["state"] for row in one], ["IN_PLACE"])
+        self.assertEqual(report["summary"]["DRIFTED"], 1)
+
+    def test_an_unchanged_glob_with_matches_is_in_place(self) -> None:
+        self.skill("one")
+        self.skill("two")
+        code, report, _ = self.drift(self.capture())
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(row["anchor"] for row in self.rows(report)),
+            [
+                "$USER_CONFIG/skills/one/SKILL.md",
+                "$USER_CONFIG/skills/two/SKILL.md",
+            ],
+        )
+
+    def test_zero_to_one_is_reported_once(self) -> None:
+        ledger = self.capture()
+        self.skill("one")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["anchor"], self.PATTERN)
+        self.assertEqual((rows[0]["state"], rows[0]["reason"]), ("DRIFTED", "appeared"))
+
+    def test_a_removed_match_is_reported_once_and_not_as_appeared(self) -> None:
+        self.skill("one")
+        two = self.skill("two")
+        ledger = self.capture()
+        two.unlink()
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        self.assertEqual(len(rows), 2, rows)
+        states = {row["anchor"]: row["state"] for row in rows}
+        self.assertEqual(states["$USER_CONFIG/skills/one/SKILL.md"], "IN_PLACE")
+        self.assertEqual(states["$USER_CONFIG/skills/two/SKILL.md"], "MISSING")
+        self.assertEqual(report["summary"]["DRIFTED"], 0)
+
+    def test_the_capture_records_the_pattern_on_each_match(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        self.assertEqual([item["attributes"].get("glob") for item in items], [self.PATTERN])
+
+    def test_a_baseline_without_the_pattern_declares_the_limitation(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"].pop("glob", None)
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.skill("two")
+        code, report, stderr = self.drift(ledger)
+        self.assertIn(self.PATTERN, stderr)
+        self.assertIn("not re-enumerated", stderr)
+        self.assertEqual(report["baselines"][0]["unenumerated"], [self.PATTERN])
+        # The limitation is declared, not invented into a state: the one item
+        # the old baseline holds is still classified on its own merits.
+        self.assertEqual([row["state"] for row in self.rows(report)], ["IN_PLACE"])
+        self.assertEqual(code, 0)

@@ -165,6 +165,10 @@ runs. That check is about the pattern; every path a probe actually produces is r
 anchor before it is opened, because a symlinked directory can carry a match out of the tree between
 the adapter being validated and the walk running.
 
+Every item a `glob` probe produces, its matches and its `not_present` item alike, carries the
+pattern in `attributes.glob` (from 0.14.0). That is what lets `drift` expand the pattern again and
+report a path that was not there at capture ([LEDGER_CHANGES.md](LEDGER_CHANGES.md)).
+
 `parse` reads the file, and `pointer` selects a sub-document within it: the location a pointer names
 becomes one item per key, which is what turns one `settings.json` into one `mcp-server` item per
 server. `parse` pairs only with `path` because parsing is per-document and a glob yields many

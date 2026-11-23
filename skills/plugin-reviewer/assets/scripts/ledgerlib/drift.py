@@ -38,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from ledgerlib.adapters import (
+    platform_excluded_anchors,
     resolve_anchor_roots,
     select_adapter_detail,
 )
@@ -48,8 +49,21 @@ from ledgerlib.constants import (
     DRIFT_STATES,
 )
 from ledgerlib.errors import LedgerError, PathSafetyError
-from ledgerlib.paths import check_glob, file_digest, load_json, resolve_anchored
-from ledgerlib.scan import BUNDLED_ADAPTERS, _resolve_pointer, redact, tomllib
+from ledgerlib.paths import (
+    anchor_path,
+    check_glob,
+    file_digest,
+    load_json,
+    resolve_anchored,
+)
+from ledgerlib.scan import (
+    BUNDLED_ADAPTERS,
+    _leaf,
+    _probe_target,
+    _resolve_pointer,
+    redact,
+    tomllib,
+)
 from ledgerlib.validate import validate_ledger
 
 
@@ -346,6 +360,138 @@ def _classify_absent_pattern(
     return IN_PLACE, None
 
 
+def _glob_additions(
+    items: Sequence[object], roots: Mapping[str, Path]
+) -> tuple[list[dict], list[tuple[str, str]], set[str]]:
+    """Ask every recorded glob again and return the paths it did not have.
+
+    Returns `(rows, problems, recorded)`. `rows` are the matches the pattern
+    yields now and the baseline does not hold, each `DRIFTED` / `appeared`;
+    `problems` pairs a pattern that could not be expanded with the reason;
+    `recorded` is every pattern the baseline says it enumerated.
+
+    A pattern whose only item is its own recorded absence (`anchor` equal to
+    the pattern) is not expanded here: `_classify_absent_pattern` already
+    answers "did anything appear" for it, and answering twice would report
+    one new Skill as two rows. A path that went away is the recorded item's
+    own `MISSING`, so nothing here looks at removals either.
+
+    The pattern is ledger content and goes through `check_glob` first, as in
+    `_classify_absent_pattern`. Matches are tested for existence only, never
+    opened: the stored form comes from `anchor_path`, the function `scan`
+    used, so a path recorded then compares equal to the same path now.
+    """
+    by_pattern: dict[str, dict] = {}
+    recorded: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        attributes = item.get("attributes")
+        pattern = attributes.get("glob") if isinstance(attributes, dict) else None
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        recorded.add(pattern)
+        group = by_pattern.setdefault(
+            pattern, {"anchors": set(), "kind": item.get("kind"), "scope": None}
+        )
+        scope = attributes.get("scope")
+        if isinstance(scope, str) and group["scope"] is None:
+            group["scope"] = scope
+        anchor = item.get("anchor")
+        if isinstance(anchor, str) and anchor != pattern:
+            group["anchors"].add(anchor)
+
+    rows: list[dict] = []
+    problems: list[tuple[str, str]] = []
+    for pattern in sorted(by_pattern):
+        group = by_pattern[pattern]
+        if not group["anchors"]:
+            continue
+        try:
+            check_glob(pattern)
+        except PathSafetyError as exc:
+            problems.append((pattern, exc.reason))
+            continue
+        reference = ANCHOR_REFERENCE.match(pattern.replace("\\", "/"))
+        if reference is None:
+            problems.append((pattern, "path_malformed_anchor_reference"))
+            continue
+        root = roots.get(reference.group(1))
+        if root is None:
+            problems.append((pattern, "path_unknown_anchor"))
+            continue
+        tail = reference.group(2) or ""
+        try:
+            matches = list(root.glob(tail)) if tail else [root]
+        except (OSError, ValueError, RecursionError, NotImplementedError):
+            problems.append((pattern, "glob_failed"))
+            continue
+        found: set[str] = set()
+        for match in matches:
+            try:
+                stored, _portable = anchor_path(match, roots)
+            except PathSafetyError:
+                # `scan` records a refused match under its absolute form, so
+                # that is the form that compares equal here.
+                stored = str(match)
+            found.add(stored)
+        for anchor in sorted(found - group["anchors"]):
+            rows.append(
+                {
+                    "kind": group["kind"],
+                    "name": _leaf(anchor),
+                    "anchor": anchor,
+                    "path": resolved_path(anchor, roots),
+                    "scope": group["scope"],
+                    "recorded_state": None,
+                    "state": DRIFTED,
+                    "reason": "appeared",
+                }
+            )
+    return rows, problems, recorded
+
+
+def _unenumerated_patterns(
+    entry: Mapping[str, object],
+    document: Mapping[str, object],
+    recorded: set[str],
+) -> list[str]:
+    """The adapter's glob patterns this baseline cannot be re-asked about.
+
+    A baseline captured before items carried `glob` holds the paths a pattern
+    matched and not the pattern, so a second match under it cannot be told
+    apart from configuration nobody ever probed. Guessing which items a
+    pattern produced would be reconstruction from shape; instead the
+    limitation is named. A pattern recorded as its own absence (an item whose
+    anchor is the pattern) is still covered, by `_classify_absent_pattern`.
+    Anchors the baseline's platform has no candidate for are skipped, as
+    `scan` skipped them.
+    """
+    items = entry.get("items")
+    anchors = {
+        item.get("anchor")
+        for item in (items if isinstance(items, list) else [])
+        if isinstance(item, dict)
+    }
+    platform = entry.get("platform")
+    excluded = platform_excluded_anchors(
+        dict(document), platform=platform if isinstance(platform, str) else None
+    )
+    probes = document.get("probes")
+    missing: set[str] = set()
+    for probe in probes if isinstance(probes, list) else []:
+        spec, is_glob = _probe_target(probe)
+        if not is_glob or spec is None:
+            continue
+        if spec in recorded or spec in anchors:
+            continue
+        reference = ANCHOR_REFERENCE.match(spec.replace("\\", "/"))
+        if reference is not None and reference.group(1) in excluded:
+            continue
+        missing.add(spec)
+    return sorted(missing)
+
+
 def _annotate_resolution(rows: list[dict], resolution: object) -> None:
     """Attach spec 3.2's resolution annotations beside -- never into -- states.
 
@@ -601,12 +747,40 @@ def drift_report(
                     "reason": reason,
                 }
             )
+        # A glob that already matched is asked again, so a path it yields now
+        # and did not then is reported (finding 5 of the 2026-11-20 review).
+        additions, problems, recorded = _glob_additions(items, roots)
+        for row in additions:
+            classified(row["state"])
+        rows.extend(additions)
+        for pattern, reason in problems:
+            findings.append(
+                f"baseline {entry.get('id')!r} pattern {pattern!r} could not "
+                f"be re-enumerated ({reason}): a path added under it since "
+                "the capture is not detected"
+            )
+        unenumerated = _unenumerated_patterns(entry, document, recorded)
+        if unenumerated:
+            notes.append(
+                f"baseline {entry.get('id')!r} does not record what "
+                f"{', '.join(repr(p) for p in unenumerated)} matched (it "
+                "predates 0.14.0 or another adapter captured it): those "
+                "patterns were not re-enumerated, so a path added under them "
+                "since is not detected; a new capture closes this"
+            )
         # After the whole entry is classified, never before or during: the
         # annotation pass reads states only to sit beside them, and running it
         # last is what keeps the adapter's declared precedence out of
         # `classify_item` structurally rather than by good intentions.
         _annotate_resolution(rows, document.get("resolution"))
-        baselines.append({"id": entry.get("id"), "client": client, "items": rows})
+        baselines.append(
+            {
+                "id": entry.get("id"),
+                "client": client,
+                "items": rows,
+                "unenumerated": unenumerated,
+            }
+        )
 
     runs: list[dict] = []
     records = ledger.get("records")

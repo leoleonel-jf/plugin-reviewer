@@ -413,8 +413,15 @@ def run_probe(
         # The probe's own pattern is the name, so the baseline records *what*
         # was absent rather than merely that something was.
         return [_item(probe, name=spec, anchor=spec, state="not_present",
-                      reason="no_match")]
+                      reason="no_match", glob=spec)]
 
+    # Every match carries the pattern that found it. Without it `drift` can
+    # revisit only the paths recorded here and never asks the pattern again,
+    # so a second Skill beside one that was captured is never reported
+    # (finding 5 of the 2026-11-20 review). The pattern is adapter data, not
+    # file content.
+    for item in items:
+        item["attributes"]["glob"] = spec
     items.sort(key=lambda item: item["anchor"])
     return items
 
@@ -788,6 +795,7 @@ def _item(
     parse_unavailable: str | None = None,
     pointer: str | None = None,
     parse_format: str | None = None,
+    glob: str | None = None,
 ) -> dict:
     """Assemble one baseline item.
 
@@ -830,6 +838,8 @@ def _item(
         attributes["pointer"] = pointer
     if parse_format is not None:
         attributes["parse"] = parse_format
+    if glob is not None:
+        attributes["glob"] = glob
     if value is not _ABSENT:
         attributes["value"] = value
 

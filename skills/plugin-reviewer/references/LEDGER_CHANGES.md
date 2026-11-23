@@ -99,6 +99,16 @@ in-file absence recorded by a baseline that predates the recorded pointer is `UN
 `no_match` item *without* a recorded pointer is a literal, wildcard-free glob that matched
 nothing, and for that item the file appearing is exactly the drift it looks like.
 
+A glob that matched something is asked again. Every item a glob probe produced carries the
+pattern in `attributes.glob` (from 0.14.0), and `drift` expands it once more: a path it yields
+now that the baseline does not hold is one row, `DRIFTED`, `appeared`, beside the recorded
+matches, which keep their own states. A match that went away is that item's `MISSING`, never a
+second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
+match under a pattern that already had one cannot be told from configuration nobody probed: the
+report lists those patterns in the baseline's `unenumerated` and says so on stderr, without
+moving the exit code, and a new capture closes it. A pattern recorded as its own absence was
+always covered, by the rule above.
+
 **A run target** compares the current digest against the pair its RUN record carries:
 
 | Current | State |
