@@ -383,6 +383,80 @@ class LockCliTests(LockCliTestCase):
         self.assertIn("lock_version", stranger.read_text(encoding="utf-8"))
 
 
+class LockOutputGuardTests(LockCliTestCase):
+    """The guard recognizes a lockfile, not a string (finding 12, 2026-11-20)."""
+
+    # A schema that describes the lockfile: it names `lock_version`, and
+    # before 0.15.0 that substring alone let `--out` consume it.
+    SCHEMA = (
+        json.dumps(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "agent.lock",
+                "type": "object",
+                "properties": {"lock_version": {"type": "integer"}},
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    def lock_to(self, out: Path, *extra: str) -> tuple[int, str, str]:
+        return self.run_cli(
+            "lock", str(self.ledger_path), "--from", "BASE-2026-000",
+            "--out", str(out), *extra,
+        )
+
+    def test_output_guard_preserves_unrelated_document(self) -> None:
+        out = self.tmp / "agent.lock.schema.json"
+        out.write_bytes(self.SCHEMA)
+        code, _o, err = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), self.SCHEMA)
+        self.assertIn("--force", err)
+
+    def test_a_lockfile_this_tool_wrote_is_replaced(self) -> None:
+        out = self.write_lock()
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 0)
+
+    def test_a_failed_replace_keeps_the_prior_lockfile_and_no_temp_file(self) -> None:
+        out = self.write_lock()
+        before = out.read_bytes()
+        names = {entry.name for entry in self.tmp.iterdir()}
+        with mock.patch("os.replace", side_effect=OSError("boom")):
+            code, _o, err = self.lock_to(out, "--force")
+        self.assertEqual(code, 2)
+        self.assertIn("boom", err)
+        self.assertEqual(out.read_bytes(), before)
+        self.assertEqual({entry.name for entry in self.tmp.iterdir()}, names)
+
+    def test_output_guard_refuses_a_reported_link(self) -> None:
+        out = self.write_lock()
+        before = out.read_bytes()
+        with mock.patch("pathlib.Path.is_symlink", return_value=True):
+            code, _o, err = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertIn("link", err)
+        self.assertEqual(out.read_bytes(), before)
+
+    def test_force_replaces_a_link_and_never_its_target(self) -> None:
+        target = self.write_lock()
+        before = target.read_bytes()
+        link = self.tmp / "linked.lock"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable here: {exc}")
+        code, _o, _e = self.lock_to(link)
+        self.assertEqual(code, 2)
+        self.assertTrue(link.is_symlink())
+        code, _o, _e = self.lock_to(link, "--force")
+        self.assertEqual(code, 0)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(target.read_bytes(), before)
+
+
 class ShippedAdapterLockableTests(unittest.TestCase):
     """The lockable set is declared data, and is exactly the spec's list."""
 
