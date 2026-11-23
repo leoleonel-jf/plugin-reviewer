@@ -1012,3 +1012,199 @@ class BuildPayloadResolvedPathTests(BuildTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import subprocess  # noqa: E402
+
+from ledgerlib import scan as scan_module  # noqa: E402
+
+
+def _strict_json(text: str) -> object:
+    """`json.loads` refusing what `JSON.parse` refuses: NaN and infinities."""
+
+    def refuse(constant: str) -> object:
+        raise ValueError(f"{constant} is not JSON")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+class NonFiniteNumberTests(unittest.TestCase):
+    """A NaN or an infinity in a configuration file reaches the HTML as JSON.
+
+    Finding 15 of the 2026-11-20 review: `threshold = nan` in a TOML file was
+    copied as a float, `json.dumps` wrote the bare token `NaN`, and the
+    dashboard's `JSON.parse` refused the data island although `build` exited
+    `0`. Captured through `update ledger` and rendered through `build`, both
+    via `dashboard.main`; the island is read by a strict parser and, where
+    Node is installed, by `JSON.parse` itself.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.user_config = self.tmp / "user_config"
+        self.user_config.mkdir()
+
+    def adapter(self, fmt: str) -> Path:
+        name = "config.toml" if fmt == "toml" else "config.json"
+        path = self.tmp / f"adapter-{fmt}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "adapter_version": 1,
+                    "client": "testclient",
+                    "expires_on": "2099-01-01",
+                    "anchors": {"$USER_CONFIG": [str(self.user_config)]},
+                    "probes": [
+                        {
+                            "kind": "mcp-server",
+                            "scope": "user",
+                            "path": f"$USER_CONFIG/{name}",
+                            "parse": fmt,
+                            "pointer": "/mcp_servers",
+                        }
+                    ],
+                    "sensitive_key_patterns": ["*token*"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def ledger(self) -> Path:
+        path = self.tmp / "ledger.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "ledger_id": "l-nonfinite",
+                    "scope": "global",
+                    "language": "en",
+                    "client": "testclient",
+                    "adapter_version": 1,
+                    "created": "2026-11-23",
+                    "updated": "2026-11-23",
+                    "id_authority": True,
+                    "sequences": {"MAT": 0, "PROP": 0, "RUN": 0, "ADR": 0, "BASE": 0},
+                    "known_projects": [],
+                    "records": [],
+                    "baselines": [],
+                    "backlog": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def main(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = dashboard.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def capture_and_build(self, fmt: str) -> tuple[Path, str]:
+        ledger = self.ledger()
+        code, _out, err = self.main(
+            "update", str(ledger), "ledger", "--adapter", str(self.adapter(fmt)),
+            "--project", str(self.tmp),
+        )
+        self.assertEqual(code, 0, err)
+        code, _out, err = self.build(ledger, fmt)
+        self.assertEqual(code, 0, err)
+        return ledger, extract_island(self.out.read_text(encoding="utf-8"))
+
+    @property
+    def out(self) -> Path:
+        return self.tmp / "dashboard.html"
+
+    def build(self, ledger: Path, fmt: str) -> tuple[int, str, str]:
+        # The adapter and project are named so the build's drift pass reads
+        # the temporary tree and never this machine's configuration.
+        return self.main(
+            "build", str(ledger), "--out", str(self.out), "--force",
+            "--adapter", str(self.adapter(fmt)), "--project", str(self.tmp),
+        )
+
+    def server_values(self, ledger: Path) -> dict:
+        try:
+            document = _strict_json(ledger.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            self.fail(f"the ledger is not strict JSON: {exc}")
+        return {
+            item["name"]: item["attributes"]["value"]
+            for item in document["baselines"][0]["items"]
+        }
+
+    def assert_browser_reads(self, island: str) -> None:
+        try:
+            _strict_json(island)
+        except ValueError as exc:
+            self.fail(f"the data island is not strict JSON: {exc}")
+        node = shutil.which("node")
+        if node is None:
+            return
+        script = (
+            "let s='';process.stdin.on('data',d=>s+=d);"
+            "process.stdin.on('end',()=>{JSON.parse(s);console.log('ok')});"
+        )
+        result = subprocess.run(
+            [node, "-e", script], input=island.encode("utf-8"),
+            capture_output=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(result.stdout.decode().strip(), "ok")
+
+    @unittest.skipIf(
+        scan_module.tomllib is None, "tomllib is absent below Python 3.11"
+    )
+    def test_nonfinite_toml_produces_browser_readable_json(self) -> None:
+        (self.user_config / "config.toml").write_text(
+            "[mcp_servers.alpha]\nthreshold = nan\nceiling = inf\nfloor = -inf\n"
+            "[mcp_servers.beta]\nthreshold = 0.5\n",
+            encoding="utf-8",
+        )
+        ledger, island = self.capture_and_build("toml")
+        self.assert_browser_reads(island)
+        values = self.server_values(ledger)
+        self.assertEqual(
+            values["alpha"], {"threshold": "nan", "ceiling": "inf", "floor": "-inf"}
+        )
+        # A finite number is the control: it stays a number.
+        self.assertEqual(values["beta"], {"threshold": 0.5})
+
+    def test_nonfinite_json_produces_browser_readable_json(self) -> None:
+        (self.user_config / "config.json").write_text(
+            '{"mcp_servers": {"alpha": {"threshold": NaN, "ceiling": Infinity,'
+            ' "floor": -Infinity}, "beta": {"threshold": 0.5}}}',
+            encoding="utf-8",
+        )
+        ledger, island = self.capture_and_build("json")
+        self.assert_browser_reads(island)
+        values = self.server_values(ledger)
+        self.assertEqual(
+            values["alpha"], {"threshold": "nan", "ceiling": "inf", "floor": "-inf"}
+        )
+        self.assertEqual(values["beta"], {"threshold": 0.5})
+
+    def test_two_captures_of_one_nonfinite_file_are_identical(self) -> None:
+        (self.user_config / "config.json").write_text(
+            '{"mcp_servers": {"alpha": {"threshold": NaN}}}', encoding="utf-8"
+        )
+        first, _ = self.capture_and_build("json")
+        values = self.server_values(first)
+        second, _ = self.capture_and_build("json")
+        self.assertEqual(values, self.server_values(second))
+
+    def test_an_older_ledger_holding_nan_still_builds_readable_json(self) -> None:
+        (self.user_config / "config.json").write_text(
+            '{"mcp_servers": {"alpha": {"threshold": 1.0}}}', encoding="utf-8"
+        )
+        ledger, _ = self.capture_and_build("json")
+        # A ledger written before 0.14.0 held the bare float.
+        text = ledger.read_text(encoding="utf-8").replace('"threshold": 1.0', '"threshold": NaN')
+        self.assertIn("NaN", text)
+        ledger.write_text(text, encoding="utf-8")
+        code, _out, err = self.build(ledger, "json")
+        self.assertEqual(code, 0, err)
+        self.assertIn("non-finite", err)
+        self.assert_browser_reads(extract_island(self.out.read_text(encoding="utf-8")))

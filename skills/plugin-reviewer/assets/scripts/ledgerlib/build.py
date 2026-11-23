@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import os
 import sys
 import tempfile
@@ -78,6 +79,34 @@ _LINE_SEPARATOR = chr(0x2028)
 _PARAGRAPH_SEPARATOR = chr(0x2029)
 
 
+def finite_payload(value: object) -> tuple[object, int]:
+    """A copy of `value` with every NaN and infinity as its `repr`, and how many.
+
+    `JSON.parse` refuses the bare `NaN` and `Infinity` tokens `json.dumps`
+    writes, so one such float anywhere in the payload left the dashboard with
+    no data at all while `build` exited `0` (finding 15 of the 2026-11-20
+    review). A capture from 0.14.0 on never holds one (`scan._jsonable`); a
+    ledger written before can, and its value is shown as `"nan"`, `"inf"` or
+    `"-inf"`, the text a new capture would record. The ledger is not touched.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value), 1
+    if isinstance(value, dict):
+        converted, count = {}, 0
+        for key, item in value.items():
+            converted[key], found = finite_payload(item)
+            count += found
+        return converted, count
+    if isinstance(value, list):
+        items, count = [], 0
+        for item in value:
+            converted_item, found = finite_payload(item)
+            items.append(converted_item)
+            count += found
+        return items, count
+    return value, 0
+
+
 def serialize_payload(payload: dict) -> str:
     """Render `payload` as the exact text the dashboard's data island holds.
 
@@ -101,7 +130,9 @@ def serialize_payload(payload: dict) -> str:
     # plus the three HTML-embedding escapes it owns. Two canonicalizations
     # would eventually disagree, and a payload disagreeing with a record
     # digest about the same object is worse than either being wrong alone.
-    text = canonical_text(payload)
+    # Non-finite floats first, so the island is JSON whatever the caller
+    # passed: `build_command` converts too, and says so, before calling here.
+    text = canonical_text(finite_payload(payload)[0])
     return (
         text.replace("<", "\\u003c")
         .replace(_LINE_SEPARATOR, "\\u2028")
@@ -564,6 +595,15 @@ def build_command(
 
     for message in messages:
         print(message, file=sys.stderr)
+
+    payload, nonfinite = finite_payload(payload)
+    if nonfinite:
+        print(
+            f"the ledger holds {nonfinite} non-finite number(s) (NaN or an "
+            "infinity), which JSON cannot carry: the dashboard shows each as "
+            "its text, \"nan\", \"inf\" or \"-inf\"; the ledger is unchanged",
+            file=sys.stderr,
+        )
 
     serialized = serialize_payload(payload)
     try:

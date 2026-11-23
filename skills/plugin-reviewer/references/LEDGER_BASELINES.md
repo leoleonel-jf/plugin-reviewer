@@ -176,7 +176,11 @@ documents against one pointer. A pointer that does not resolve is one `not_prese
 error — a client with no MCP servers configured has no `mcpServers` key, and the baseline has to
 record that it looked. A file that will not parse is `present`, with its digest and a stable
 `parse_error`; a `toml` probe under an interpreter without `tomllib` is `present`, with its digest and
-`parse_unavailable`, never a crash and never a pretence that the file held nothing.
+`parse_unavailable`, never a crash and never a pretence that the file held nothing. Both are also
+findings of the run, `parse_failed` and `parse_unavailable` (from 0.14.0), each naming the probe's
+kind and the file, so the exit code is `1` and `update --strict` refuses to append
+([LEDGER.md](LEDGER.md)). A key the file does not have is an ordinary verified absence and no
+finding.
 
 `scope` is recorded and never resolved. It names the layer an item came from — the shipped adapters
 use `user`, `project`, `system`, and `managed`. `scan` computes no precedence winner from it;
@@ -188,7 +192,9 @@ No text a parsed document holds reaches a baseline. Every string value is replac
 `{"redacted": true, "digest": "sha256:…"}`, whatever key it sits under, so an item's
 `attributes.value` carries the document's shape (key names, nesting, array lengths, and its
 numbers, booleans and nulls) and one digest per string. That is enough to say which leaf changed
-between two baselines and never enough to say what it held.
+between two baselines and never enough to say what it held. A NaN or an infinity, which JSON cannot
+carry, is stored as its text, `"nan"`, `"inf"` or `"-inf"` (from 0.14.0); `build` shows one found
+in an older ledger the same way and says so on stderr.
 
 `sensitive_key_patterns` are `fnmatch` patterns matched case-insensitively against key names in a
 parsed document, so `*key*` and the literal `env` both work, and `env` matches the key `env` without

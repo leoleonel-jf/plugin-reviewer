@@ -211,8 +211,8 @@ the authority in the loop. The reasoning is recorded in
 
 The `update` summary on stdout always carries `findings`, a list of `{"code", "message"}` pairs
 (empty when nothing was found or when the word is `anchors`), and `refused`, `null` unless the
-command declined to write. The codes are `generic_fallback`, `adapter_expired`,
-`user_config_unresolved` and `unredacted_parse`. By default a finding still appends the baseline and
+command declined to write. Codes: `generic_fallback`, `adapter_expired`, `user_config_unresolved`,
+`unredacted_parse`, `parse_failed`, `parse_unavailable`. By default a finding still appends the baseline and
 the exit code `1` carries it. With `--strict`, `update ledger` and `update all` write nothing when the
 scan reports any finding: the ledger keeps its bytes, no dashboard is rendered, `baseline_id` is
 `null`, `refused` is `"strict"` and the exit code is `1`. `--strict` has no effect on `update anchors`.

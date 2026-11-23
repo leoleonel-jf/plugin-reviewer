@@ -918,3 +918,122 @@ class MarkersAreNotTransformedTwiceTestCase(unittest.TestCase):
 
         result = withhold_text(redact({"token": "abc"}, ["token"]))
         self.assertEqual(json.loads(json.dumps(result)), result)
+
+
+from ledgerlib import scan as scan_module  # noqa: E402
+
+
+class ParserCoverageTestCase(UpdateFixtureTestCase):
+    """A file the parser could not read is a finding (finding 9, 2026-11-20).
+
+    `scan` recorded `parse_error` on the item, but the exit code came from
+    findings computed before any probe ran: an incomplete `config.toml` gave
+    `update ledger --strict` exit `0`, `findings: []` and a baseline whose MCP
+    servers were simply not there. Every test runs `update ledger` through
+    `dashboard.main`.
+    """
+
+    def parse_adapter(self, fmt: str) -> Path:
+        name = "config.toml" if fmt == "toml" else "config.json"
+        pointer = "/mcp_servers" if fmt == "toml" else "/mcpServers"
+        path = self.tmp / f"adapter-{fmt}.json"
+        document = json.loads(self.adapter_path.read_text(encoding="utf-8"))
+        document["probes"].append(
+            {
+                "kind": "mcp-server",
+                "scope": "user",
+                "path": f"$USER_CONFIG/{name}",
+                "parse": fmt,
+                "pointer": pointer,
+            }
+        )
+        document["sensitive_key_patterns"] = ["*token*"]
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def config(self, name: str, text: str) -> None:
+        (self.user_config / name).write_text(text, encoding="utf-8")
+
+    def cli_update(self, adapter: Path, *extra: str) -> tuple[int, Path, bytes, dict]:
+        self.give_the_probe_something_to_find()
+        ledger_path = self.write_ledger(self.bare_ledger())
+        before = ledger_path.read_bytes()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = dashboard.main(
+                ["update", str(ledger_path), "ledger", "--adapter", str(adapter),
+                 "--project", str(self.tmp), *extra]
+            )
+        return code, ledger_path, before, json.loads(out.getvalue())
+
+    def parse_findings(self, summary: dict) -> list[dict]:
+        return [f for f in summary["findings"] if f["code"] == "parse_failed"]
+
+    @unittest.skipIf(
+        scan_module.tomllib is None, "tomllib is absent below Python 3.11"
+    )
+    def test_strict_update_refuses_malformed_toml(self) -> None:
+        self.config("config.toml", "[mcp_servers.alpha]\ncommand = \n")
+        code, ledger_path, before, summary = self.cli_update(
+            self.parse_adapter("toml"), "--strict"
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(ledger_path.read_bytes(), before)
+        self.assertEqual(summary["refused"], "strict")
+        found = self.parse_findings(summary)
+        self.assertEqual(len(found), 1, summary)
+        self.assertIn("$USER_CONFIG/config.toml", found[0]["message"])
+        self.assertIn("malformed_toml", found[0]["message"])
+        self.assertIn("mcp-server", found[0]["message"])
+
+    def test_strict_update_refuses_malformed_json(self) -> None:
+        self.config("config.json", '{"mcpServers": {"alpha": ')
+        code, ledger_path, before, summary = self.cli_update(
+            self.parse_adapter("json"), "--strict"
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(ledger_path.read_bytes(), before)
+        found = self.parse_findings(summary)
+        self.assertEqual(len(found), 1, summary)
+        self.assertIn("malformed_json", found[0]["message"])
+
+    def test_without_strict_the_partial_capture_is_kept_and_declared(self) -> None:
+        self.config("config.json", '{"mcpServers": {"alpha": ')
+        code, ledger_path, _before, summary = self.cli_update(self.parse_adapter("json"))
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["baseline_id"], "BASE-2026-000")
+        self.assertEqual(len(self.parse_findings(summary)), 1, summary)
+        document = json.loads(ledger_path.read_text(encoding="utf-8"))
+        errors = [
+            item["attributes"].get("parse_error")
+            for item in document["baselines"][0]["items"]
+        ]
+        self.assertIn("malformed_json", errors)
+
+    def test_a_missing_optional_key_is_not_a_finding(self) -> None:
+        self.config("config.json", '{"model": "x"}')
+        code, _ledger_path, _before, summary = self.cli_update(
+            self.parse_adapter("json"), "--strict"
+        )
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(summary["findings"], [])
+
+    def test_a_valid_file_is_not_a_finding(self) -> None:
+        self.config("config.json", '{"mcpServers": {"alpha": {"command": "x"}}}')
+        code, _ledger_path, _before, summary = self.cli_update(
+            self.parse_adapter("json"), "--strict"
+        )
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(summary["findings"], [])
+
+    def test_an_unavailable_toml_parser_is_its_own_finding(self) -> None:
+        self.config("config.toml", "[mcp_servers.alpha]\ncommand = 'x'\n")
+        with mock.patch.object(scan_module, "tomllib", None):
+            code, ledger_path, before, summary = self.cli_update(
+                self.parse_adapter("toml"), "--strict"
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(ledger_path.read_bytes(), before)
+        codes = [f["code"] for f in summary["findings"]]
+        self.assertEqual(codes, ["parse_unavailable"], summary)
+        self.assertIn("$USER_CONFIG/config.toml", summary["findings"][0]["message"])
