@@ -1050,6 +1050,7 @@ footer {
 
     "overview.cards": "Indicators",
     "overview.unreachable": "Projects whose recorded root could not be reached",
+    "overview.unverified": "Projects on a network path, not checked",
 
     "card.active_changes": "Active changes",
     "card.active_changes.note": "RUN records that have not been rolled back.",
@@ -1200,6 +1201,7 @@ footer {
     "table.open": "Open",
     "projects.no_path": "No absolute path was recorded, so there is nothing to open from here.",
     "projects.unreachable_note": "The recorded root could not be reached, so it is not offered as a link.",
+    "projects.unverified_note": "Network path: the build does not contact other machines, so this root was not checked and is not offered as a link.",
 
     "vocab.class.ADOPT GLOBALLY.tip": "Worth applying to every project, in the user-global configuration.",
     "vocab.class.ADOPT AS A DEFAULT FOR NEW PROJECTS.tip": "Worth building into new projects, without touching the ones that exist.",
@@ -1312,6 +1314,7 @@ footer {
 
     "overview.cards": "Indicadores",
     "overview.unreachable": "Projetos cuja raiz registrada não pôde ser alcançada",
+    "overview.unverified": "Projetos em caminho de rede, não verificados",
 
     "card.active_changes": "Mudanças em vigor",
     "card.active_changes.note": "Registros RUN que ainda não foram revertidos.",
@@ -1462,6 +1465,7 @@ footer {
     "table.open": "Abrir",
     "projects.no_path": "Nenhum caminho absoluto foi registrado, então não há o que abrir daqui.",
     "projects.unreachable_note": "A raiz registrada não pôde ser alcançada, então ela não vira link.",
+    "projects.unverified_note": "Caminho de rede: o build não contata outras máquinas, então esta raiz não foi verificada e não vira link.",
 
     "vocab.class.ADOPT GLOBALLY.tip": "Vale aplicar em todos os projetos, na configuração global do usuário.",
     "vocab.class.ADOPT AS A DEFAULT FOR NEW PROJECTS.tip": "Vale embutir em projetos novos, sem mexer nos que já existem.",
@@ -3392,6 +3396,7 @@ footer {
     var previews = computedFor("previews");
     var expired = computedFor("expired_evidence");
     var unreachable = unreachableProjects();
+    var unverified = unverifiedProjects();
     var driftCount = drift === null ? null : driftIndicator(drift);
     var previewCount = previews === null ? null : previewIndicator(previews);
 
@@ -3422,7 +3427,7 @@ footer {
     section.appendChild(h("h3", null, t("overview.cards")));
     section.appendChild(cards);
 
-    var projects = projectList(unreachable);
+    var projects = projectList(unreachable, unverified);
     if (projects !== null) {
       section.appendChild(h("h3", null, t("overview.projects")));
       section.appendChild(projects);
@@ -3431,6 +3436,13 @@ footer {
     if (unreachable.length !== 0) {
       section.appendChild(h("h3", null, t("overview.unreachable")));
       section.appendChild(h("ul", { class: "keys" }, unreachable.map(function (root) {
+        return h("li", null, h("code", { class: "path" }, root));
+      })));
+    }
+
+    if (unverified.length !== 0) {
+      section.appendChild(h("h3", null, t("overview.unverified")));
+      section.appendChild(h("ul", { class: "keys" }, unverified.map(function (root) {
         return h("li", null, h("code", { class: "path" }, root));
       })));
     }
@@ -3447,18 +3459,22 @@ footer {
      the reader should know the ledger recorded something this page cannot
      turn into a link, not be left wondering why one row has buttons and
      the next does not. */
-  function projectList(unreachable) {
+  function projectList(unreachable, unverified) {
     var entries = ledgerList("known_projects").filter(function (entry) {
       return Boolean(entry) && typeof entry === "object";
     });
     if (entries.length === 0) { return null; }
     return h("ul", { class: "keys" }, entries.map(function (entry) {
       var gone = unreachable.indexOf(entry.project_root) !== -1;
-      var root = gone ? null : openLink("projects.open_root", entry.project_root);
-      var book = gone ? null : openLink("projects.open_ledger", entry.ledger_path);
+      var unchecked = unverified.indexOf(entry.project_root) !== -1;
+      var linkable = !gone && !unchecked;
+      var root = linkable ? openLink("projects.open_root", entry.project_root) : null;
+      var book = linkable ? openLink("projects.open_ledger", entry.ledger_path) : null;
       var note = null;
       if (gone) {
         note = h("span", { class: "note" }, t("projects.unreachable_note"));
+      } else if (unchecked) {
+        note = h("span", { class: "note" }, t("projects.unverified_note"));
       } else if (root === null && book === null) {
         note = h("span", { class: "note" }, t("projects.no_path"));
       }
@@ -3591,6 +3607,16 @@ footer {
       }
     });
     return roots;
+  }
+
+  /* Network roots the build listed without checking (ledgerlib.build
+     `is_network_root`): asking whether one exists would contact another
+     machine. A static page, or one built before 0.15.0, has no such list,
+     and claims none. */
+  function unverifiedProjects() {
+    var listed = computedFor("unverified_projects");
+    if (!Array.isArray(listed)) { return []; }
+    return listed.filter(function (root) { return typeof root === "string"; });
   }
 
   /* Inventory ---------------------------------------------------------- */

@@ -28,6 +28,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -451,6 +452,56 @@ class BuildPayloadUnreachableProjectsTests(BuildTestCase):
         self.assertEqual(
             payload["computed"]["unreachable_projects"], [str(gone)]
         )
+        self.assertEqual(payload["computed"]["unverified_projects"], [])
+
+    # Fictitious network roots, both spellings Windows accepts, plus the
+    # device form. None of them resolves anywhere; the test proves the build
+    # never asks.
+    NETWORK_ROOTS = (
+        "\\\\fileserver.invalid\\share\\project",
+        "//fileserver.invalid/share/project",
+        "\\\\?\\UNC\\fileserver.invalid\\share\\project",
+    )
+
+    def test_remote_project_root_is_not_probed_during_build(self) -> None:
+        """Finding 10 of the 2026-11-20 review: no filesystem call on a UNC root.
+
+        `Path.exists` on `\\\\server\\share` makes Windows contact the share
+        while a local page is being built. Every filesystem entry point the
+        check could reach is instrumented, and none may see a network root.
+        """
+        present = self.tmp / "present-project"
+        present.mkdir()
+        gone = self.tmp / "gone-project"
+        known_projects = [
+            self.known_project(project_root=str(present)),
+            self.known_project(project_root=str(gone)),
+            *(self.known_project(project_root=root) for root in self.NETWORK_ROOTS),
+        ]
+        ledger = self.valid_ledger(known_projects=known_projects)
+
+        seen: list[str] = []
+
+        def recording(real):
+            def call(path, *args, **kwargs):
+                seen.append(str(os.fspath(path)) if not isinstance(path, int) else "")
+                return real(path, *args, **kwargs)
+            return call
+
+        with mock.patch("os.stat", side_effect=recording(os.stat)), mock.patch(
+            "os.lstat", side_effect=recording(os.lstat)
+        ), mock.patch("os.path.exists", side_effect=recording(os.path.exists)):
+            payload, _ = self.build(ledger)
+
+        touched = [
+            path for path in seen
+            if "fileserver.invalid" in path.replace("/", "\\")
+        ]
+        self.assertEqual(touched, [], "the build asked the filesystem about a network root")
+        self.assertEqual(
+            payload["computed"]["unverified_projects"], list(self.NETWORK_ROOTS)
+        )
+        self.assertEqual(payload["computed"]["unreachable_projects"], [str(gone)])
 
 
 class BuildPayloadValidationTests(BuildTestCase):
