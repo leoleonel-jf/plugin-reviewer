@@ -211,8 +211,8 @@ the authority in the loop. The reasoning is recorded in
 
 The `update` summary on stdout always carries `findings`, a list of `{"code", "message"}` pairs
 (empty when nothing was found or when the word is `anchors`), and `refused`, `null` unless the
-command declined to write. The codes are `generic_fallback`, `adapter_expired`,
-`user_config_unresolved` and `unredacted_parse`. By default a finding still appends the baseline and
+command declined to write. Codes: `generic_fallback`, `adapter_expired`, `user_config_unresolved`,
+`unredacted_parse`, `parse_failed`, `parse_unavailable`. By default a finding still appends the baseline and
 the exit code `1` carries it. With `--strict`, `update ledger` and `update all` write nothing when the
 scan reports any finding: the ledger keeps its bytes, no dashboard is rendered, `baseline_id` is
 `null`, `refused` is `"strict"` and the exit code is `1`. `--strict` has no effect on `update anchors`.
@@ -344,7 +344,7 @@ python assets/scripts/dashboard.py verify <path-to-ledger.json> [more...]
 Pass every reachable ledger in one invocation so cross-ledger checks run: known-project digest
 comparison against the referenced ledger's on-disk bytes (the check that depends most on every
 ledger being present, since a ledger left out of the invocation cannot be compared at all),
-duplicate identifiers (within or across ledgers), sequence consistency, unreconciled provisional
+duplicate identifiers (within or across ledgers, a baseline's `id` counted beside the records'), sequence consistency, unreconciled provisional
 identifiers, dangling links, backlog `id` back-references, and more than one ledger claiming ID
 authority.
 

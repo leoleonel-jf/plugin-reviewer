@@ -1417,3 +1417,312 @@ class ResolvedPathReportTests(DriftReportTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlobFixture(DriftCliTestCase):
+    """A glob probe captured through `update ledger` and read through `drift`."""
+
+    PATTERN = "$USER_CONFIG/skills/*/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": self.PATTERN}
+        ]
+        return document
+
+    def skill(self, name: str) -> Path:
+        return self.write(
+            self.user_config / "skills" / name / "SKILL.md", f"# {name}\n"
+        )
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update",
+            str(ledger),
+            "ledger",
+            "--adapter",
+            str(self.adapter_path),
+            "--project",
+            str(self.tmp),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift(self, ledger: Path) -> tuple[int, dict, str]:
+        code, stdout, stderr = self.run_cli(*self.drift_arguments(ledger))
+        return code, json.loads(stdout), stderr
+
+    def rows(self, report: dict) -> list[dict]:
+        return [row for entry in report["baselines"] for row in entry["items"]]
+
+
+
+class GlobEnumerationTests(GlobFixture):
+    """A glob probe that already had matches is re-enumerated, not just revisited.
+
+    Finding 5 of the 2026-11-20 review: `scan` stores the individual paths a
+    glob matched, and `drift` revisited only those, so a second Skill under a
+    pattern that already matched one was never reported. Every test captures
+    through `update ledger` and classifies through `drift`, the two commands a
+    user runs, so the attribute that carries the pattern is exercised by the
+    writer that records it and the reader that consumes it.
+    """
+
+    def test_drift_detects_second_skill_matching_existing_glob(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        self.skill("two")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        by_anchor: dict[str, list[dict]] = {}
+        for row in self.rows(report):
+            by_anchor.setdefault(row["anchor"], []).append(row)
+        two = by_anchor.get("$USER_CONFIG/skills/two/SKILL.md", [])
+        self.assertEqual(len(two), 1, by_anchor)
+        self.assertEqual(two[0]["state"], "DRIFTED")
+        self.assertEqual(two[0]["reason"], "appeared")
+        self.assertEqual(two[0]["kind"], "skill")
+        one = by_anchor["$USER_CONFIG/skills/one/SKILL.md"]
+        self.assertEqual([row["state"] for row in one], ["IN_PLACE"])
+        self.assertEqual(report["summary"]["DRIFTED"], 1)
+
+    def test_an_unchanged_glob_with_matches_is_in_place(self) -> None:
+        self.skill("one")
+        self.skill("two")
+        code, report, _ = self.drift(self.capture())
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(row["anchor"] for row in self.rows(report)),
+            [
+                "$USER_CONFIG/skills/one/SKILL.md",
+                "$USER_CONFIG/skills/two/SKILL.md",
+            ],
+        )
+
+    def test_zero_to_one_is_reported_once(self) -> None:
+        ledger = self.capture()
+        self.skill("one")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["anchor"], self.PATTERN)
+        self.assertEqual((rows[0]["state"], rows[0]["reason"]), ("DRIFTED", "appeared"))
+
+    def test_a_removed_match_is_reported_once_and_not_as_appeared(self) -> None:
+        self.skill("one")
+        two = self.skill("two")
+        ledger = self.capture()
+        two.unlink()
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        self.assertEqual(len(rows), 2, rows)
+        states = {row["anchor"]: row["state"] for row in rows}
+        self.assertEqual(states["$USER_CONFIG/skills/one/SKILL.md"], "IN_PLACE")
+        self.assertEqual(states["$USER_CONFIG/skills/two/SKILL.md"], "MISSING")
+        self.assertEqual(report["summary"]["DRIFTED"], 0)
+
+    def test_the_capture_records_the_pattern_on_each_match(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        self.assertEqual([item["attributes"].get("glob") for item in items], [self.PATTERN])
+
+    def test_a_baseline_without_the_pattern_declares_the_limitation(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"].pop("glob", None)
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.skill("two")
+        code, report, stderr = self.drift(ledger)
+        self.assertIn(self.PATTERN, stderr)
+        self.assertIn("not re-enumerated", stderr)
+        self.assertEqual(report["baselines"][0]["unenumerated"], [self.PATTERN])
+        # The limitation is declared, not invented into a state: the one item
+        # the old baseline holds is still classified on its own merits.
+        self.assertEqual([row["state"] for row in self.rows(report)], ["IN_PLACE"])
+        self.assertEqual(code, 0)
+
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+
+class GlobBoundaryTests(GlobFixture):
+    """The re-enumeration holds a match to its probe's own anchor (Eve, 0.14.0).
+
+    `scan` refuses a match that resolves outside the anchor its pattern names,
+    even when it lands inside another anchor. The first version of the drift
+    re-enumeration stored such a match under whichever anchor fitted and
+    reported it, path and all, as configuration that appeared.
+    """
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        self.home = self.tmp / "home"
+        self.home.mkdir(exist_ok=True)
+        document["anchors"]["$HOME"] = [str(self.home)]
+        return document
+
+    def link(self, link: Path, target: Path) -> None:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, link, target_is_directory=True)
+            return
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            first = exc
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0 and link.is_dir():
+                return
+        self.skipTest(f"platform {sys.platform}: cannot create a directory link: {first}")
+
+    def assert_refused_without_its_path(self, report: dict, secret: str) -> None:
+        rows = self.rows(report)
+        self.assertNotIn(secret, json.dumps(report))
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+        refused = [row for row in rows if row["state"] == "UNVERIFIABLE"]
+        self.assertEqual(len(refused), 1, rows)
+        self.assertEqual(refused[0]["anchor"], self.PATTERN)
+        self.assertIsNone(refused[0]["path"])
+        self.assertIn(refused[0]["reason"], PATH_SAFETY_REASONS)
+
+    def test_a_new_match_linked_into_another_anchor_is_refused(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        secret_dir = self.home / "secret-7c1e"
+        self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        self.assert_refused_without_its_path(report, "secret-7c1e")
+
+    def test_a_new_match_linked_outside_every_anchor_is_refused(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        outside = self.tmp / "outside-4b2d"
+        self.write(outside / "SKILL.md", "outside every anchor\n")
+        self.link(self.user_config / "skills" / "evil", outside)
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        self.assert_refused_without_its_path(report, "outside-4b2d")
+
+    def test_a_new_match_linked_inside_the_anchor_is_an_addition(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        inner = self.user_config / "elsewhere" / "inner"
+        self.write(inner / "SKILL.md", "# inner\n")
+        self.link(self.user_config / "skills" / "alias", inner)
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        appeared = [r for r in self.rows(report) if r["reason"] == "appeared"]
+        # Stored in the resolved form, the one `scan` records for the match.
+        self.assertEqual(
+            [r["anchor"] for r in appeared], ["$USER_CONFIG/elsewhere/inner/SKILL.md"]
+        )
+        self.assertEqual(report["summary"]["UNVERIFIABLE"], 0)
+
+
+class OverlappingPatternsTests(GlobFixture):
+    """One identity is one row, whichever patterns reach it (Eve, 0.14.0)."""
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md"},
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/t*/SKILL.md"},
+        ]
+        return document
+
+    def test_two_overlapping_patterns_of_one_probe_report_an_addition_once(
+        self,
+    ) -> None:
+        self.skill("tone")
+        ledger = self.capture()
+        self.skill("two")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        appeared = [r for r in self.rows(report) if r["reason"] == "appeared"]
+        self.assertEqual(len(appeared), 1, appeared)
+        self.assertEqual(report["summary"]["DRIFTED"], 1)
+
+
+class OnePatternTwoKindsTests(GlobFixture):
+    """One pattern serving two probes is asked once for each (Eve, 0.14.0)."""
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md"},
+            {"kind": "agent", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md"},
+        ]
+        return document
+
+    def test_one_pattern_serving_two_kinds_reports_each(self) -> None:
+        self.skill("one")
+        ledger = self.capture()
+        self.skill("two")
+        _code, report, _ = self.drift(ledger)
+        appeared = [r for r in self.rows(report) if r["reason"] == "appeared"]
+        self.assertEqual(sorted(r["kind"] for r in appeared), ["agent", "skill"])
+
+
+class BoundaryBeforeIdentityTests(GlobBoundaryTests):
+    """The anchor is checked before a known identity is skipped (Eve, R2).
+
+    Two probes of one kind and scope with different roots, as the shipped
+    Codex adapter has for `skill/user`. A new match of the second probe that
+    links into a path the first probe already recorded resolved to an
+    identity the baseline held, was skipped as known, and the refusal was
+    never reported: exit `0`, nothing said.
+    """
+
+    PATTERN = "$HOME/skills/*/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md"},
+            {"kind": "skill", "scope": "user", "glob": self.PATTERN},
+        ]
+        return document
+
+    def test_a_link_into_a_path_another_probe_recorded_is_still_refused(
+        self,
+    ) -> None:
+        self.skill("one")
+        self.write(self.home / "skills" / "h1" / "SKILL.md", "# h1\n")
+        ledger = self.capture()
+        self.link(self.home / "skills" / "evil", self.user_config / "skills" / "one")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        refused = [row for row in rows if row["state"] == "UNVERIFIABLE"]
+        self.assertEqual(len(refused), 1, rows)
+        self.assertEqual(refused[0]["anchor"], self.PATTERN)
+        self.assertIsNone(refused[0]["path"])
+        self.assertIn(refused[0]["reason"], PATH_SAFETY_REASONS)
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+
+    def test_an_unchanged_pair_of_probes_is_in_place(self) -> None:
+        self.skill("one")
+        self.write(self.home / "skills" / "h1" / "SKILL.md", "# h1\n")
+        code, report, _ = self.drift(self.capture())
+        self.assertEqual(code, 0, self.rows(report))
+
+    # The inherited scenarios name `$USER_CONFIG/skills/...` as the pattern
+    # under test; this class moves the pattern under test to `$HOME`.
+    test_a_new_match_linked_into_another_anchor_is_refused = None
+    test_a_new_match_linked_outside_every_anchor_is_refused = None
+    test_a_new_match_linked_inside_the_anchor_is_an_addition = None

@@ -11,7 +11,7 @@ Two design decisions carry the module.
 
 **Determinism is a requirement, not a quality.** The file is meant to be
 committed and read in a diff, so two runs over one baseline produce identical
-bytes: entries sorted by `(kind, scope, anchor)`, no timestamp, no absolute
+bytes: entries sorted by `(kind, scope, anchor, name)`, no timestamp, no absolute
 path, nothing machine-specific beyond the platform the baseline itself
 recorded. Canonicalization is `chain.canonical_text`, the one canonicalization
 in this repository.
@@ -49,19 +49,66 @@ _MARKER = '"lock_version"'
 
 
 def _baseline(ledger: Mapping, baseline_id: object) -> dict:
+    """The one baseline with this id. Raises when there is none or more than one.
+
+    Two baselines sharing an id are an invalid ledger that `verify` reports;
+    picking the first would pin whichever came first in the file and call it
+    the baseline the user named (finding 7 of the 2026-11-20 review).
+    """
     baselines = ledger.get("baselines") if isinstance(ledger, Mapping) else None
-    for entry in baselines if isinstance(baselines, list) else []:
-        if isinstance(entry, Mapping) and entry.get("id") == baseline_id:
-            return dict(entry)
-    raise LedgerError(f"no baseline with id {baseline_id!r} exists in this ledger")
+    holders = [
+        (position, entry)
+        for position, entry in enumerate(baselines if isinstance(baselines, list) else [])
+        if isinstance(entry, Mapping) and entry.get("id") == baseline_id
+    ]
+    if not holders:
+        raise LedgerError(f"no baseline with id {baseline_id!r} exists in this ledger")
+    if len(holders) > 1:
+        places = ", ".join(f"baselines[{position}]" for position, _ in holders)
+        raise LedgerError(
+            f"baseline id {baseline_id!r} is held by {len(holders)} baselines "
+            f"in this ledger ({places}): refusing to pin or compare an "
+            "ambiguous baseline; `verify` reports the duplicate"
+        )
+    return dict(holders[0][1])
 
 
-def _key(entry: Mapping) -> tuple[str, str, str]:
+def _key(entry: Mapping) -> tuple[str, str, str, str]:
+    """An entry's identity: kind, scope, anchor and name.
+
+    The name is part of it because one file can declare several pinnable
+    things: two MCP servers in one `config.toml` share kind, scope, anchor and
+    the file's digest, and without the name they collapsed into one key, so a
+    server taken out went unreported (finding 6 of the 2026-11-20 review).
+    Pins have always carried `name`, so a pin written before 0.14.0 compares
+    by the same key.
+    """
     return (
         str(entry.get("kind") or ""),
         str(entry.get("scope") or ""),
         str(entry.get("anchor") or ""),
+        str(entry.get("name") or ""),
     )
+
+
+def _by_key(entries: list[Mapping], *, side: str) -> dict[tuple, Mapping]:
+    """Index entries by identity, refusing one identity held twice.
+
+    A repeated identity has no single "before" or "after" to compare, so it
+    is a diagnostic of its own rather than a silent last-one-wins.
+    """
+    indexed: dict[tuple, Mapping] = {}
+    for entry in entries:
+        key = _key(entry)
+        if key in indexed:
+            kind, scope, anchor, name = key
+            raise LedgerError(
+                f"the {side} holds {kind} {name!r} at {anchor!r} (scope "
+                f"{scope or None!r}) twice: one identity with two entries "
+                "cannot be pinned or compared"
+            )
+        indexed[key] = entry
+    return indexed
 
 
 def _entries(baseline: Mapping, lockable: frozenset[str]) -> list[dict]:
@@ -85,6 +132,7 @@ def _entries(baseline: Mapping, lockable: frozenset[str]) -> list[dict]:
                 "state": item.get("state"),
             }
         )
+    _by_key(rows, side=f"baseline {baseline.get('id')!r}")
     rows.sort(key=_key)
     return rows
 
@@ -147,13 +195,18 @@ def check_lock(
                 f"{field}s would report every entry as both added and removed"
             )
 
-    current = {_key(entry): entry for entry in _entries(baseline, lockable)}
+    current = _by_key(
+        _entries(baseline, lockable), side=f"baseline {baseline_id!r}"
+    )
     pinned_entries = locked.get("entries")
-    pinned = {
-        _key(entry): entry
-        for entry in (pinned_entries if isinstance(pinned_entries, list) else [])
-        if isinstance(entry, Mapping)
-    }
+    pinned = _by_key(
+        [
+            entry
+            for entry in (pinned_entries if isinstance(pinned_entries, list) else [])
+            if isinstance(entry, Mapping)
+        ],
+        side="lockfile",
+    )
 
     rows: list[dict] = []
     for key in sorted(set(pinned) | set(current)):

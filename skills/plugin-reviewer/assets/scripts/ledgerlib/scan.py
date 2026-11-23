@@ -22,6 +22,7 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
@@ -88,12 +89,22 @@ FINDING_GENERIC_FALLBACK = "generic_fallback"
 FINDING_ADAPTER_EXPIRED = "adapter_expired"
 FINDING_USER_CONFIG_UNRESOLVED = "user_config_unresolved"
 FINDING_UNREDACTED_PARSE = "unredacted_parse"
+# A file a `parse` probe could not read or interpret, and a format this
+# interpreter has no parser for. Both leave the probe uncovered: the file's
+# digest is recorded, what it declares is not, and before these existed the
+# baseline came out with `findings: []` (finding 9 of the 2026-11-20 review).
+# Two codes, not one, because the remedies differ: fix the file, or run on an
+# interpreter that has `tomllib` (Python 3.11+).
+FINDING_PARSE_FAILED = "parse_failed"
+FINDING_PARSE_UNAVAILABLE = "parse_unavailable"
 FINDING_CODES = frozenset(
     {
         FINDING_GENERIC_FALLBACK,
         FINDING_ADAPTER_EXPIRED,
         FINDING_USER_CONFIG_UNRESOLVED,
         FINDING_UNREDACTED_PARSE,
+        FINDING_PARSE_FAILED,
+        FINDING_PARSE_UNAVAILABLE,
     }
 )
 
@@ -413,8 +424,15 @@ def run_probe(
         # The probe's own pattern is the name, so the baseline records *what*
         # was absent rather than merely that something was.
         return [_item(probe, name=spec, anchor=spec, state="not_present",
-                      reason="no_match")]
+                      reason="no_match", glob=spec)]
 
+    # Every match carries the pattern that found it. Without it `drift` can
+    # revisit only the paths recorded here and never asks the pattern again,
+    # so a second Skill beside one that was captured is never reported
+    # (finding 5 of the 2026-11-20 review). The pattern is adapter data, not
+    # file content.
+    for item in items:
+        item["attributes"]["glob"] = spec
     items.sort(key=lambda item: item["anchor"])
     return items
 
@@ -496,13 +514,17 @@ def _probe_one(
         return [_item(probe, name=name, anchor=anchor, state="present",
                       reason="not_regular_file", portable=portable)]
 
+    fmt = _parse_format(probe)
     try:
         digest = file_digest(resolved)
     except (OSError, ValueError, MemoryError):
+        # A `parse` probe that cannot read its file has read nothing it was
+        # meant to: `parse_error` makes that a finding of the run, as it is
+        # when the read fails inside the parser (Eve's review of 0.14.0).
         return [_item(probe, name=name, anchor=anchor, state="present",
-                      reason="unreadable", portable=portable)]
+                      reason="unreadable", portable=portable,
+                      parse_error="unreadable" if fmt is not None else None)]
 
-    fmt = _parse_format(probe)
     if fmt is None:
         return [_item(probe, name=name, anchor=anchor, state="present",
                       digest=digest, portable=portable)]
@@ -721,6 +743,13 @@ def _jsonable(value: object) -> object:
 
     Runs after `redact`, never instead of it. Markers are ordinary dicts of
     JSON-native leaves and pass through unchanged.
+
+    A NaN or an infinity is a float `json.dumps` accepts and writes as the
+    bare token `NaN` or `Infinity`, which is not JSON: the dashboard's
+    `JSON.parse` refused the whole data island over one `threshold = nan`
+    (finding 15 of the 2026-11-20 review). They follow the same rule as the
+    other leaves JSON cannot carry and become their `repr`, `"nan"`, `"inf"`
+    or `"-inf"`, the same text on every run. A finite float passes through.
     """
     if isinstance(value, dict):
         return {
@@ -729,6 +758,8 @@ def _jsonable(value: object) -> object:
         }
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     return repr(value)
@@ -788,6 +819,7 @@ def _item(
     parse_unavailable: str | None = None,
     pointer: str | None = None,
     parse_format: str | None = None,
+    glob: str | None = None,
 ) -> dict:
     """Assemble one baseline item.
 
@@ -830,6 +862,8 @@ def _item(
         attributes["pointer"] = pointer
     if parse_format is not None:
         attributes["parse"] = parse_format
+    if glob is not None:
+        attributes["glob"] = glob
     if value is not _ABSENT:
         attributes["value"] = value
 
@@ -968,6 +1002,7 @@ def scan_detail(
     items: list[dict] = []
     for probe in document["probes"]:
         items.extend(run_probe(probe, roots, patterns, excluded))
+    findings.extend(_parse_findings(items))
 
     entry = {
         "id": identifier,
@@ -1022,6 +1057,46 @@ def _check_captured_on(captured_on: object) -> str:
     if not isinstance(captured_on, str) or not DATE.fullmatch(captured_on):
         raise LedgerError(f"invalid captured_on {captured_on!r}: must be YYYY-MM-DD")
     return captured_on
+
+
+def _parse_findings(items: Sequence[dict]) -> list[dict[str, str]]:
+    """One finding per item whose file a `parse` probe could not interpret.
+
+    The item already says so in `parse_error` or `parse_unavailable`; this is
+    what makes the run say so too, so the exit code and `--strict` see it. A
+    key the file does not have (`pointer_unresolved`) is the ordinary case of
+    an absent optional setting, recorded and verified, and is no finding.
+    """
+    findings: list[dict[str, str]] = []
+    for item in items:
+        attributes = item.get("attributes")
+        if not isinstance(attributes, dict):
+            continue
+        kind, anchor = item.get("kind"), item.get("anchor")
+        error = attributes.get("parse_error")
+        if isinstance(error, str):
+            recorded = (
+                "the file's digest is recorded and what it declares is not"
+                if item.get("digest") is not None
+                else "neither the file's digest nor what it declares is recorded"
+            )
+            _add_finding(
+                findings,
+                FINDING_PARSE_FAILED,
+                f"the {kind} probe could not parse {anchor} ({error}): "
+                f"{recorded}, so no {kind} from it is in this baseline, "
+                "present or absent",
+            )
+        unavailable = attributes.get("parse_unavailable")
+        if isinstance(unavailable, str):
+            _add_finding(
+                findings,
+                FINDING_PARSE_UNAVAILABLE,
+                f"this interpreter has no {unavailable} parser (tomllib needs "
+                f"Python 3.11 or later): the {kind} probe recorded {anchor} by "
+                f"digest only, so no {kind} from it is in this baseline",
+            )
+    return findings
 
 
 def _add_finding(
