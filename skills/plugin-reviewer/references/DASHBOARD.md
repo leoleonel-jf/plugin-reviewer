@@ -52,6 +52,15 @@ single-document `validate_collection` pass, same code, not similar code — fail
 the same code `dashboard.py verify` runs, so checking a ledger first with `dashboard.py verify
 LEDGER` predicts exactly whether it will build.
 
+**`update all` failures (from 0.15.0).** The `update` summary carries `failed_step`, `null` when
+every step ran. `update all` checks the dashboard destination before it captures anything: an
+`--out` the overwrite guard refuses, or whose directory does not exist, writes nothing, spends no
+baseline ID, and reports `refused` and `failed_step` as `"output"` with exit `1`. When the render
+fails after the baseline was appended, the summary still reaches stdout with the recorded
+`baseline_id` and `failed_step: "render"`, and the exit code is the build's. Re-render with
+`dashboard.py build LEDGER` (same `--out`): `build` never allocates an ID, so the recovery adds
+no baseline.
+
 **No `--template` flag.** The template is read from the bundle
 (`assets/templates/dashboard.html`) only. Injection replaces the payload island's content and
 nothing else, and the code asserts the marker `id="aio-payload"` occurs exactly once before it
