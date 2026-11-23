@@ -1676,3 +1676,53 @@ class OnePatternTwoKindsTests(GlobFixture):
         _code, report, _ = self.drift(ledger)
         appeared = [r for r in self.rows(report) if r["reason"] == "appeared"]
         self.assertEqual(sorted(r["kind"] for r in appeared), ["agent", "skill"])
+
+
+class BoundaryBeforeIdentityTests(GlobBoundaryTests):
+    """The anchor is checked before a known identity is skipped (Eve, R2).
+
+    Two probes of one kind and scope with different roots, as the shipped
+    Codex adapter has for `skill/user`. A new match of the second probe that
+    links into a path the first probe already recorded resolved to an
+    identity the baseline held, was skipped as known, and the refusal was
+    never reported: exit `0`, nothing said.
+    """
+
+    PATTERN = "$HOME/skills/*/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md"},
+            {"kind": "skill", "scope": "user", "glob": self.PATTERN},
+        ]
+        return document
+
+    def test_a_link_into_a_path_another_probe_recorded_is_still_refused(
+        self,
+    ) -> None:
+        self.skill("one")
+        self.write(self.home / "skills" / "h1" / "SKILL.md", "# h1\n")
+        ledger = self.capture()
+        self.link(self.home / "skills" / "evil", self.user_config / "skills" / "one")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        rows = self.rows(report)
+        refused = [row for row in rows if row["state"] == "UNVERIFIABLE"]
+        self.assertEqual(len(refused), 1, rows)
+        self.assertEqual(refused[0]["anchor"], self.PATTERN)
+        self.assertIsNone(refused[0]["path"])
+        self.assertIn(refused[0]["reason"], PATH_SAFETY_REASONS)
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+
+    def test_an_unchanged_pair_of_probes_is_in_place(self) -> None:
+        self.skill("one")
+        self.write(self.home / "skills" / "h1" / "SKILL.md", "# h1\n")
+        code, report, _ = self.drift(self.capture())
+        self.assertEqual(code, 0, self.rows(report))
+
+    # The inherited scenarios name `$USER_CONFIG/skills/...` as the pattern
+    # under test; this class moves the pattern under test to `$HOME`.
+    test_a_new_match_linked_into_another_anchor_is_refused = None
+    test_a_new_match_linked_outside_every_anchor_is_refused = None
+    test_a_new_match_linked_inside_the_anchor_is_an_addition = None

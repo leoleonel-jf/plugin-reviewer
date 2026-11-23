@@ -12,8 +12,9 @@ could not read. Pull requests 43 to 45, and 47 for the review of the release.
 - **`drift` asks a glob again** (finding 5). Every item a glob probe produces carries the pattern
   in `attributes.glob`, and `drift` expands it once more: a path it yields now that the baseline
   does not hold is one row, `DRIFTED`, `appeared`, held to the anchor the pattern names as `scan`
-  holds it; a match that resolves outside it is one `UNVERIFIABLE` row naming the pattern, never
-  its path. Before, a second Skill beside one that was
+  holds it, before it is compared with what the baseline holds; a match that resolves outside it
+  is one `UNVERIFIABLE` row naming the pattern, never its path. A pattern that matched nothing keeps
+  the earlier rule: any match is `DRIFTED`, `appeared`, under the pattern's own name. Before, a second Skill beside one that was
   captured exited `0` with no row for it. A match that went away is still that item's `MISSING`,
   never a second row. **What changes for you:** a baseline captured before 0.14.0 holds the
   matches and not the pattern; the report lists those patterns in the baseline's new
