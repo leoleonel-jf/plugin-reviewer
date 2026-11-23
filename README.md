@@ -68,7 +68,7 @@ See [packaging/README.md](packaging/README.md) for the package contract, support
 Add this repository as a marketplace and install the plugin:
 
 ```text
-codex plugin marketplace add leoleonel-jf/plugin-reviewer --ref v0.14.0
+codex plugin marketplace add leoleonel-jf/plugin-reviewer --ref v0.15.0
 codex plugin add plugin-reviewer@plugin-reviewer
 ```
 
@@ -123,7 +123,7 @@ Your ledger does not move. A machine that already has `<user-config>/agent-inges
 
 ### Other Agent Skills clients
 
-Download the `plugin-reviewer-0.14.0-skill.zip` release asset and install its single top-level Skill directory according to the client's documentation.
+Download the `plugin-reviewer-0.15.0-skill.zip` release asset and install its single top-level Skill directory according to the client's documentation.
 
 ## Use
 
