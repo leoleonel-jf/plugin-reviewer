@@ -43,6 +43,7 @@ from ledgerlib import drift, rollback
 from ledgerlib.chain import canonical_text, chain_head, verify_chain
 from ledgerlib.constants import TOOL_VERSION
 from ledgerlib.errors import LedgerError
+from ledgerlib.outputs import guard_output
 from ledgerlib.paths import _path_key, file_digest, load_json
 from ledgerlib.validate import validate_collection, validate_ledger
 
@@ -417,15 +418,64 @@ def inject_payload(template_text: str, serialized: str) -> str:
     return template_text[:tag_end] + serialized + template_text[content_end:]
 
 
+def looks_like_dashboard(data: bytes) -> bool:
+    """Whether `data` is a page this tool wrote: the shell, built or not.
+
+    The test is the island itself, found the way `inject_payload` finds it:
+    exactly one `id="aio-payload"` marker, on a `<script` tag, whose content
+    parses as a JSON object carrying an integer `payload_schema` and a string
+    `mode`. The shipped template passes (its island holds the static
+    payload); a document that only quotes the tag, with `{...}` or any other
+    non-payload inside, does not (finding 12 of the 2026-11-20 review). A
+    payload never adds a second raw marker: inside JSON its quotes are
+    escaped.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if text.count(_ISLAND_MARKER) != 1:
+        return False
+    marker_at = text.index(_ISLAND_MARKER)
+    tag_start = text.rfind("<", 0, marker_at)
+    if tag_start == -1 or not text.startswith("<script", tag_start):
+        return False
+    tag_end = text.find(">", marker_at)
+    content_end = text.find("</script", tag_end)
+    if tag_end == -1 or content_end == -1:
+        return False
+    try:
+        island = json.loads(text[tag_end + 1 : content_end])
+    except ValueError:
+        return False
+    if not isinstance(island, dict):
+        return False
+    schema = island.get("payload_schema")
+    return (
+        isinstance(schema, int)
+        and not isinstance(schema, bool)
+        and isinstance(island.get("mode"), str)
+    )
+
+
+def guard_dashboard_output(out: Path, *, force: bool) -> None:
+    """The dashboard's overwrite guard alone, without writing anything."""
+    guard_output(
+        out,
+        force=force,
+        recognizes=looks_like_dashboard,
+        artifact="a generated dashboard (no aio-payload island holding a payload)",
+    )
+
+
 def write_dashboard(html: str, out: Path, *, force: bool) -> None:
     """Write `html` to `out`, atomically, refusing to clobber a stray file.
 
-    The overwrite guard (design spec section 3): an existing `out` is left
-    alone unless it already looks like a generated dashboard -- it contains
-    the `aio-payload` marker -- or the caller passed `force=True`. This is
-    the first ledger-adjacent write command in the bundle, so the guard is
-    the only thing standing between a typo'd `--out` and a file that had
-    nothing to do with this tool.
+    The overwrite guard (design spec section 3, `ledgerlib.outputs`): an
+    existing `out` is left alone unless `looks_like_dashboard` accepts it,
+    or the caller passed `force=True`; a link at `out` is refused without
+    `force`. The guard is the only thing standing between a typo'd `--out`
+    and a file that had nothing to do with this tool.
 
     The write itself goes through a temporary file created in `out`'s own
     directory, then `os.replace`. `os.replace` is what this guarantees: a
@@ -439,24 +489,7 @@ def write_dashboard(html: str, out: Path, *, force: bool) -> None:
     basis before the exception propagates, so a failed build leaves no
     stray `.tmp` file behind.
     """
-    if out.exists() and not force:
-        try:
-            # Bytes, not text: an existing `out` that happens to hold
-            # non-UTF-8 content (a stray binary file at that path, say) must
-            # not crash the overwrite guard with a `UnicodeDecodeError` --
-            # it is exactly the kind of file this guard exists to protect.
-            existing = out.read_bytes()
-        except OSError as exc:
-            raise LedgerError(
-                f"cannot read existing file {str(out)!r} to check the "
-                f"overwrite guard: {exc}"
-            ) from exc
-        if _ISLAND_MARKER.encode("utf-8") not in existing:
-            raise LedgerError(
-                f"refusing to overwrite {str(out)!r}: it does not look like a "
-                "generated dashboard (no aio-payload marker); pass --force to "
-                "overwrite it anyway"
-            )
+    guard_dashboard_output(out, force=force)
 
     fd, tmp_name = tempfile.mkstemp(
         dir=str(out.parent), prefix=out.name + ".", suffix=".tmp"

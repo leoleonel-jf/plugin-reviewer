@@ -35,10 +35,14 @@ dashboard.py build LEDGER [--out PATH] [--lang CODE] [--force]
 | `--force` | Overrides the overwrite guard (see below). |
 | `--project`, `--adapter`, `--user-config` | Same meaning as for `scan`/`drift`: they feed the `computed.drift` and `computed.previews` sub-computations. |
 
-**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file
-itself carries the shell marker `id="aio-payload"` — the file being replaced must already be a
-dashboard. `--force` overrides the guard. This is the first ledger-adjacent command that writes;
-it writes exactly one file, atomically (temp file, then rename), and never creates a directory.
+**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file is
+itself a dashboard this tool wrote: exactly one `id="aio-payload"` script island whose content is
+a payload (a JSON object with `payload_schema` and `mode`). A document that only quotes the tag is
+refused (from 0.15.0; before, the marker text alone passed). A link at `--out` is refused too.
+`--force` skips the guard and means the same for `build`, `update` and `lock`: whatever is at
+`--out` is replaced, and a link is replaced by a regular file, never written through. This is the
+first ledger-adjacent command that writes; it writes exactly one file, atomically (temp file,
+then rename), and never creates a directory.
 
 **Verification gate.** A ledger that `verify` would reject — `validate_ledger` plus the
 single-document `validate_collection` pass, same code, not similar code — fails the build with

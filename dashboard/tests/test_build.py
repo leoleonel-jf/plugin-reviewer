@@ -618,7 +618,11 @@ class WriteDashboardTests(BuildTestCase):
 
     def test_overwrites_a_file_that_already_contains_the_marker(self) -> None:
         out = self.tmp / "dashboard.html"
-        out.write_text('<script id="aio-payload">{}</script>', encoding="utf-8")
+        out.write_text(
+            '<script type="application/json" id="aio-payload">'
+            '{"payload_schema":1,"mode":"built"}</script>',
+            encoding="utf-8",
+        )
         write_dashboard("<html>new</html>", out, force=False)
         self.assertEqual(out.read_text(encoding="utf-8"), "<html>new</html>")
 
@@ -661,6 +665,95 @@ class WriteDashboardTests(BuildTestCase):
         with self.assertRaises(LedgerError):
             write_dashboard("<html>new</html>", out, force=False)
         self.assertEqual(out.read_bytes(), raw)
+
+
+class OutputGuardIdentityTests(BuildTestCase):
+    """The guard recognizes a dashboard, not a string (finding 12, 2026-11-20).
+
+    Before 0.15.0 any file holding the text `id="aio-payload"` passed as a
+    generated dashboard, so a document that only describes the format was
+    consumed by a typo'd `--out`.
+    """
+
+    DOCUMENT = (
+        "# Notes on the dashboard\n\n"
+        "The generated file's payload island is:\n\n"
+        "```html\n"
+        '<script type="application/json" id="aio-payload">{...}</script>\n'
+        "```\n"
+    ).encode("utf-8")
+
+    def test_output_guard_preserves_unrelated_document(self) -> None:
+        out = self.tmp / "notes.md"
+        out.write_bytes(self.DOCUMENT)
+        with self.assertRaises(LedgerError) as ctx:
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("--force", str(ctx.exception))
+        self.assertEqual(out.read_bytes(), self.DOCUMENT)
+
+    def test_build_refuses_an_unrelated_document_as_out(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "notes.md"
+        out.write_bytes(self.DOCUMENT)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, out, None, False)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.read_bytes(), self.DOCUMENT)
+        self.assertIn("refusing to overwrite", err.getvalue())
+
+    def test_output_guard_accepts_the_shipped_template_and_a_built_page(self) -> None:
+        out = self.tmp / "dashboard.html"
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        write_dashboard("<html>first</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), "<html>first</html>")
+
+    def test_output_guard_refuses_an_island_without_a_payload(self) -> None:
+        """Valid JSON is not enough: it must be a payload document."""
+        out = self.tmp / "dashboard.html"
+        text = '<script type="application/json" id="aio-payload">{"a":1}</script>'
+        out.write_text(text, encoding="utf-8")
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), text)
+
+    def test_output_guard_refuses_a_reported_link(self) -> None:
+        """A link at `--out` is refused before anything reads through it."""
+        out = self.tmp / "dashboard.html"
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        before = out.read_bytes()
+        with mock.patch("pathlib.Path.is_symlink", return_value=True):
+            with self.assertRaises(LedgerError) as ctx:
+                write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("link", str(ctx.exception))
+        self.assertEqual(out.read_bytes(), before)
+
+    def _link_to_a_dashboard(self) -> tuple[Path, Path]:
+        target = self.tmp / "elsewhere.html"
+        target.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        link = self.tmp / "dashboard.html"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable here: {exc}")
+        return link, target
+
+    def test_output_guard_refuses_a_real_link(self) -> None:
+        link, target = self._link_to_a_dashboard()
+        before = target.read_bytes()
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", link, force=False)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_force_replaces_the_link_and_never_its_target(self) -> None:
+        link, target = self._link_to_a_dashboard()
+        before = target.read_bytes()
+        write_dashboard("<html>new</html>", link, force=True)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(link.read_text(encoding="utf-8"), "<html>new</html>")
+        self.assertEqual(target.read_bytes(), before)
 
 
 class BuildCommandTestCase(BuildTestCase):
