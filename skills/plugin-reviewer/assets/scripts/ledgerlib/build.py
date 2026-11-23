@@ -230,18 +230,34 @@ def _expired_evidence(ledger: dict, today: str) -> list[dict]:
     return expired
 
 
-def _unreachable_projects(ledger: dict) -> list[str]:
-    """Every `known_projects` entry whose recorded root no longer exists.
+def is_network_root(root: str) -> bool:
+    """Whether `root` names a network or device path, decided from the text alone.
 
-    This asks the filesystem a single question -- does the path exist -- and
-    nothing else: it never opens the project's own ledger, never reads a
-    byte of it, and never resolves it through the anchor-safety layer that
-    governs a client's configuration files, because a known project's root
-    is not an anchor any adapter declared; it is simply a path this ledger
-    recorded. A root too malformed even to stat is honestly unreachable
-    rather than a crash reaching the caller.
+    Two leading separators, in either direction: `\\\\server\\share`,
+    `//server/share`, and the device forms `\\\\?\\...` and `\\\\.\\...`. On
+    Windows asking whether such a path exists contacts the server, so a
+    local build must not ask (finding 10 of the 2026-11-20 review). The test
+    is the same on every platform, so one ledger yields one payload wherever
+    it is built; a device path to a local disk is classified the same way,
+    the cautious side of the line.
+    """
+    return len(root) >= 2 and root[0] in "\\/" and root[1] in "\\/"
+
+
+def _project_roots(ledger: dict) -> tuple[list[str], list[str]]:
+    """`(unreachable, unverified)` over the ledger's `known_projects`.
+
+    A network root (`is_network_root`) is unverified: it is classified
+    before any filesystem call and never checked. Every other root is asked
+    a single question -- does the path exist -- and nothing else: the
+    project's own ledger is never opened, and the root is not resolved
+    through the anchor-safety layer, because it is not an anchor any adapter
+    declared; it is simply a path this ledger recorded. A root too malformed
+    even to stat is honestly unreachable rather than a crash reaching the
+    caller.
     """
     unreachable: list[str] = []
+    unverified: list[str] = []
     projects = ledger.get("known_projects")
     projects = projects if isinstance(projects, list) else []
     for entry in projects:
@@ -250,13 +266,16 @@ def _unreachable_projects(ledger: dict) -> list[str]:
         root = entry.get("project_root")
         if not isinstance(root, str) or not root.strip():
             continue
+        if is_network_root(root):
+            unverified.append(root)
+            continue
         try:
             reachable = Path(root).exists()
         except (OSError, ValueError):
             reachable = False
         if not reachable:
             unreachable.append(root)
-    return unreachable
+    return unreachable, unverified
 
 
 def build_payload(
@@ -292,7 +311,8 @@ def build_payload(
     `ledger_source` exists only to label a validation finding, the way a
     path read by `drift_command` labels one. The one filesystem question
     this function asks directly -- rather than through `drift_report` or
-    `rollback_preview` -- is `unreachable_projects`' existence check.
+    `rollback_preview` -- is `_project_roots`' existence check, which a
+    network root never reaches.
     """
     if not isinstance(ledger, dict):
         raise LedgerError("ledger must be a JSON object")
@@ -339,6 +359,7 @@ def build_payload(
         except LedgerError as exc:
             previews[run_id] = {"error": str(exc)}
 
+    unreachable, unverified = _project_roots(ledger)
     payload = {
         "payload_schema": PAYLOAD_SCHEMA,
         "mode": "built",
@@ -350,7 +371,9 @@ def build_payload(
             "drift": drift_result,
             "previews": previews,
             "expired_evidence": _expired_evidence(ledger, today_value),
-            "unreachable_projects": _unreachable_projects(ledger),
+            "unreachable_projects": unreachable,
+            # Network roots, listed and never checked (`is_network_root`).
+            "unverified_projects": unverified,
             # The chain verdict plus the records that broke it. `head` rides
             # along so a reader can compare it against the digest they
             # recorded outside the ledger without leaving the page -- the page

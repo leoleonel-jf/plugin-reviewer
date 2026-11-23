@@ -96,7 +96,7 @@ partial render. An unparseable island is a fatal error for the shell, not a degr
 
 | Client situation | What you get |
 |---|---|
-| **Full** (Python + browser) | Run `build`; open the generated file. All panels populate; `computed.drift`, `computed.previews`, `computed.expired_evidence`, `computed.unreachable_projects` are present; mode is `built`. |
+| **Full** (Python + browser) | Run `build`; open the generated file. All panels populate; `computed.drift`, `computed.previews`, `computed.expired_evidence`, `computed.unreachable_projects`, `computed.unverified_projects` are present; mode is `built`. |
 | **No Python** | Follow the static-injection recipe above against `assets/templates/dashboard.html`. Open the resulting file in a browser. `mode` is `static`; the overview states plainly that digest verification, drift, and rollback preview are unavailable — nothing shown has been checked against a file on disk. |
 | **No browser** | Generate the degraded text view instead (see below): fill `assets/templates/DASHBOARD.md`'s token placeholders from the ledger and read the resulting Markdown. |
 | **Unknown client** (neither a bundled adapter nor a confirmed local one) | `scan`/`drift`/`build`'s `--adapter`/`--user-config` machinery still runs, but a `computed.drift` or `computed.previews` sub-computation that fails carries an `error` message instead of a report, and `build` still succeeds. The corresponding panel shows an "unavailable" note naming the exact command that would compute it (see `card.unavailable.*` in the template), rather than a false zero. |
@@ -210,6 +210,12 @@ an export.
   `file` is still not linkable: it is relative to a ledger whose location the page does not know.
   A project marked unreachable, or a root that is not an absolute local path, gets no Open link
   and says so, rather than a link that goes nowhere.
+- **Network roots are not checked.** A `project_root` that starts with two separators (a UNC
+  path such as `\\server\share`, `//server/share`, or a device path) is listed in
+  `computed.unverified_projects` and shown as "not checked", from 0.15.0. `build` decides this
+  from the text alone and asks the filesystem nothing about it, because on Windows that question
+  contacts the server. Local roots are still checked: an existing one is reachable and a missing
+  one is unreachable.
 - **Rollback is two-step.** "Prepare" reveals the §11 preview summary and a confirmation prompt;
   only after "Yes, undo this run" is clicked does the instruction's copy and queue buttons enable.
   Nothing re-arms or disarms silently — there is no timeout, and leaving the Rollback panel and
