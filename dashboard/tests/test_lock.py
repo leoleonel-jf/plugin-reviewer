@@ -44,6 +44,7 @@ from ledgerlib.lock import (  # noqa: E402
     LOCK_VERSION,
     build_lock,
     check_lock,
+    render_lock,
 )
 
 LOCKABLE_KINDS = frozenset(
@@ -416,3 +417,123 @@ class ShippedAdapterLockableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SHARED = "$USER_CONFIG/config.toml"
+
+
+def server(name: str, **overrides: object) -> dict:
+    """An `mcp-server` item parsed out of the one shared `config.toml`."""
+    return item(
+        "mcp-server", name, anchor=SHARED, digest="sha256:" + "c" * 64, **overrides
+    )
+
+
+class EntryIdentityTests(unittest.TestCase):
+    """An entry is identified by its name too (finding 6 of the 2026-11-20 review).
+
+    Two servers declared in one `config.toml` share kind, scope and anchor,
+    and the file's digest. Keyed by those three alone they collapsed into one
+    comparison key, so a server taken out of the baseline went unreported.
+    """
+
+    def lock_of(self, document: dict) -> dict:
+        return build_lock(
+            document, baseline_id="BASE-2026-000", lockable=LOCKABLE_KINDS
+        )
+
+    def check(self, locked: dict, document: dict):
+        return check_lock(locked, document, lockable=LOCKABLE_KINDS)
+
+    def test_check_lock_reports_removed_server_at_shared_path(self) -> None:
+        locked = self.lock_of(ledger(items=[server("alpha"), server("beta")]))
+        rows, code = self.check(locked, ledger(items=[server("beta")]))
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [(row["difference"], row["name"]) for row in rows], [("removed", "alpha")]
+        )
+
+    def test_an_added_server_at_a_shared_path_is_named(self) -> None:
+        locked = self.lock_of(ledger(items=[server("beta")]))
+        rows, code = self.check(locked, ledger(items=[server("alpha"), server("beta")]))
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [(row["difference"], row["name"]) for row in rows], [("added", "alpha")]
+        )
+
+    def test_entry_order_does_not_change_the_result(self) -> None:
+        locked = self.lock_of(ledger(items=[server("beta"), server("alpha")]))
+        locked["entries"].reverse()
+        rows, code = self.check(locked, ledger(items=[server("alpha"), server("beta")]))
+        self.assertEqual((rows, code), ([], 0))
+
+    def test_a_pin_from_before_the_name_was_part_of_the_key_still_checks(
+        self,
+    ) -> None:
+        # Pins always carried `name`; only the comparison ignored it. A pin
+        # whose entries are ordered the old way, by kind, scope and anchor
+        # with ties in baseline order, compares clean against its baseline.
+        document = ledger(items=[server("beta"), server("alpha"), item("skill", "one")])
+        locked = self.lock_of(document)
+        locked["entries"].sort(key=lambda e: (e["kind"], e["scope"] or "", e["anchor"]))
+        rows, code = self.check(locked, document)
+        self.assertEqual((rows, code), ([], 0))
+
+    def test_a_baseline_with_one_identity_twice_is_refused_by_build(self) -> None:
+        document = ledger(items=[server("alpha"), server("alpha")])
+        with self.assertRaises(LedgerError) as caught:
+            self.lock_of(document)
+        self.assertIn("alpha", str(caught.exception))
+        self.assertIn("twice", str(caught.exception))
+
+    def test_a_lockfile_pinning_one_identity_twice_is_refused_by_check(self) -> None:
+        document = ledger(items=[server("alpha")])
+        locked = self.lock_of(document)
+        locked["entries"].append(dict(locked["entries"][0]))
+        with self.assertRaises(LedgerError) as caught:
+            self.check(locked, document)
+        self.assertIn("alpha", str(caught.exception))
+        self.assertIn("lockfile", str(caught.exception))
+
+    def test_a_baseline_with_one_identity_twice_is_refused_by_check(self) -> None:
+        locked = self.lock_of(ledger(items=[server("alpha")]))
+        with self.assertRaises(LedgerError) as caught:
+            self.check(locked, ledger(items=[server("alpha"), server("alpha")]))
+        self.assertIn("baseline", str(caught.exception))
+
+
+class AmbiguousBaselineTests(LockCliTestCase):
+    """Two baselines with one id: the lock pins neither (finding 7)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        document = ledger()
+        twin = dict(document["baselines"][0])
+        twin["items"] = [item("skill", "two")]
+        document["baselines"].append(twin)
+        self.ledger_path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+    def test_lock_refuses_ambiguous_baseline(self) -> None:
+        out = self.tmp / "agent.lock"
+        code, stdout, stderr = self.run_cli(
+            "lock", str(self.ledger_path), "--from", "BASE-2026-000", "--out", str(out)
+        )
+        self.assertEqual(code, 2)
+        self.assertFalse(out.exists())
+        self.assertEqual(stdout, "")
+        self.assertIn("BASE-2026-000", stderr)
+        self.assertIn("baselines[0]", stderr)
+        self.assertIn("baselines[1]", stderr)
+
+    def test_check_refuses_an_ambiguous_baseline(self) -> None:
+        out = self.tmp / "agent.lock"
+        out.write_text(
+            render_lock(build_lock(ledger(), baseline_id="BASE-2026-000",
+                                   lockable=LOCKABLE_KINDS)),
+            encoding="utf-8",
+        )
+        code, _stdout, stderr = self.run_cli(
+            "lock", str(self.ledger_path), "--check", str(out)
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("BASE-2026-000", stderr)

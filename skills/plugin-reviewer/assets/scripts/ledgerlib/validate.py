@@ -467,6 +467,12 @@ def validate_collection(
     # complete=False skips link checks to avoid false dangling-link findings.
     findings: list[str] = []
     seen: dict[str, str] = {}
+    # Every baseline holding an id, as `<source> baselines[<index>]`. A
+    # baseline is an identifier holder like a record, so an id held twice --
+    # by two baselines, or by a baseline and a record -- is a duplicate
+    # (finding 7 of the 2026-11-20 review); before, baselines fed only the
+    # sequence check and `lock --from` pinned whichever came first.
+    baseline_holders: dict[str, str] = {}
     declared: set[str] = set()
     authorities: list[str] = []
     all_records: list[tuple[str, dict]] = []
@@ -497,6 +503,11 @@ def validate_collection(
                 )
             else:
                 seen[identifier] = source
+            if identifier in baseline_holders:
+                findings.append(
+                    f"Duplicate id {identifier}: a record in {source} and "
+                    f"{baseline_holders[identifier]}"
+                )
             declared.add(identifier)
             reconciled = record.get("pending_id_reconciliation") is True
             if PROVISIONAL_ID.search(identifier) and not reconciled:
@@ -517,12 +528,25 @@ def validate_collection(
         # same per-document floor and authority-wide coverage below.
         baselines = data.get("baselines") if isinstance(data, dict) else None
         baselines = baselines if isinstance(baselines, list) else []
-        for baseline in baselines:
+        for index, baseline in enumerate(baselines):
             if not isinstance(baseline, dict):
                 continue
             identifier = baseline.get("id")
             if not isinstance(identifier, str) or not RECORD_ID.fullmatch(identifier):
                 continue
+            holder = f"{source} baselines[{index}]"
+            if identifier in baseline_holders:
+                findings.append(
+                    f"Duplicate baseline id {identifier} in "
+                    f"{baseline_holders[identifier]} and {holder}"
+                )
+            else:
+                baseline_holders[identifier] = holder
+            if identifier in seen:
+                findings.append(
+                    f"Duplicate id {identifier}: {holder} and a record in "
+                    f"{seen[identifier]}"
+                )
             prefix, number = _prefix_and_number(identifier)
             current = highest.get(prefix)
             if current is None or number > current[0]:

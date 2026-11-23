@@ -344,7 +344,7 @@ python assets/scripts/dashboard.py verify <path-to-ledger.json> [more...]
 Pass every reachable ledger in one invocation so cross-ledger checks run: known-project digest
 comparison against the referenced ledger's on-disk bytes (the check that depends most on every
 ledger being present, since a ledger left out of the invocation cannot be compared at all),
-duplicate identifiers (within or across ledgers), sequence consistency, unreconciled provisional
+duplicate identifiers (within or across ledgers, a baseline's `id` counted beside the records'), sequence consistency, unreconciled provisional
 identifiers, dangling links, backlog `id` back-references, and more than one ledger claiming ID
 authority.
 
