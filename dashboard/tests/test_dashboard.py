@@ -5449,6 +5449,19 @@ class DuplicateBaselineIdTests(unittest.TestCase):
         self.assertTrue(collisions, findings)
         self.assertTrue(any("other" in f for f in collisions), collisions)
 
+    def test_a_record_before_the_baseline_holding_its_id_is_a_collision(
+        self,
+    ) -> None:
+        data = minimal_ledger()
+        data["sequences"]["BASE"] = 1
+        data["baselines"] = [self.baseline("4")]
+        findings = dashboard.validate_collection(
+            [("other", {"records": [{"id": "BASE-2026-000"}]}), ("only", data)]
+        )
+        collisions = [f for f in findings if "BASE-2026-000" in f and "only" in f]
+        self.assertTrue(collisions, findings)
+        self.assertTrue(any("other" in f for f in collisions), collisions)
+
     def test_distinct_baseline_ids_still_verify(self) -> None:
         data = minimal_ledger()
         data["sequences"]["BASE"] = 2
