@@ -413,10 +413,17 @@ def _glob_additions(
         recorded.add(pattern)
         group = groups.setdefault(
             (pattern, repr(kind), repr(scope)),
-            {"pattern": pattern, "kind": kind, "scope": scope, "matched": False},
+            {
+                "pattern": pattern,
+                "kind": kind,
+                "scope": scope,
+                "matched": False,
+                "anchors": set(),
+            },
         )
         if isinstance(anchor, str) and anchor != pattern:
             group["matched"] = True
+            group["anchors"].add(anchor)
 
     rows: list[dict] = []
     problems: list[tuple[str, str]] = []
@@ -454,7 +461,12 @@ def _glob_additions(
                 # `scan` records a refused match under its absolute form, so
                 # that is the form that compares equal here.
                 stored = str(match)
-            if (repr(kind), scope, stored) in identities:
+            # The boundary first, the identity after (Eve, R2): a match that
+            # escapes this probe's anchor into a path another probe recorded
+            # resolves to a known identity, and skipping it as known would
+            # silence the refusal. Only this probe's own record of the same
+            # path -- a refusal a recapture wrote -- makes it known here.
+            if stored in group["anchors"]:
                 continue
             try:
                 resolved = resolve_anchored(stored, roots)
@@ -465,6 +477,8 @@ def _glob_additions(
                     )
             except PathSafetyError as exc:
                 refused = refused or exc.reason
+                continue
+            if (repr(kind), scope, stored) in identities:
                 continue
             found.add(stored)
         for anchor in sorted(found):

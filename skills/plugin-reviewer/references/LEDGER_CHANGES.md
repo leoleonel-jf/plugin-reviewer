@@ -104,7 +104,9 @@ pattern in `attributes.glob` (from 0.14.0), and `drift` expands it once more: a 
 now that the baseline does not hold is one row, `DRIFTED`, `appeared`, beside the recorded
 matches, which keep their own states. A match is held to the anchor its pattern names, as `scan`
 holds it: one that resolves outside it, into another anchor or none, is one `UNVERIFIABLE` row
-naming the pattern and the reason, never the path it reached. A new path is new once, by kind,
+naming the pattern and the reason, never the path it reached, even when another probe recorded
+that path. That boundary applies to a pattern that already matched; a pattern recorded as its own
+absence reports any match as `appeared` under the pattern's name. A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the
