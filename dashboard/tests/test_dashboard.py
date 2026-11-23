@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -5384,3 +5385,88 @@ class LedgerReferenceSplitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DuplicateBaselineIdTests(unittest.TestCase):
+    """Two holders of one id fail `verify` (finding 7 of the 2026-11-20 review).
+
+    A baseline fed the sequence check but was never entered in the set of ids
+    already seen, so two different baselines both called `BASE-2026-000`
+    produced `1 ledger(s) validated` and `lock --from` pinned whichever came
+    first. Every test goes through `verify`, the command a user runs.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def baseline(self, digest_char: str) -> dict:
+        entry = minimal_baseline()
+        entry["items"][0]["digest"] = "sha256:" + digest_char * 64
+        return entry
+
+    def write(self, name: str, data: dict) -> Path:
+        directory = self.tmp / name
+        directory.mkdir()
+        return write_ledger(directory, data)
+
+    def test_verify_rejects_duplicate_baseline_id(self) -> None:
+        data = minimal_ledger()
+        data["sequences"]["BASE"] = 1
+        data["baselines"] = [self.baseline("4"), self.baseline("5")]
+        code, stdout, stderr = _capture_verify([self.write("one", data)])
+        self.assertEqual(code, 1, stdout + stderr)
+        output = stdout + stderr
+        self.assertIn("BASE-2026-000", output)
+        self.assertIn("baselines[0]", output)
+        self.assertIn("baselines[1]", output)
+
+    def test_verify_rejects_one_baseline_id_in_two_ledgers(self) -> None:
+        first = minimal_ledger()
+        first["sequences"]["BASE"] = 1
+        first["baselines"] = [self.baseline("4")]
+        second = minimal_ledger()
+        second["scope"] = "project"
+        second["id_authority"] = False
+        second["sequences"]["BASE"] = 1
+        second["baselines"] = [self.baseline("5")]
+        paths = [self.write("first", first), self.write("second", second)]
+        code, stdout, stderr = _capture_verify(paths)
+        self.assertEqual(code, 1, stdout + stderr)
+        output = stdout + stderr
+        self.assertIn("BASE-2026-000", output)
+        self.assertIn(str(paths[0]), output)
+        self.assertIn(str(paths[1]), output)
+
+    def test_a_baseline_id_held_by_a_record_is_a_collision(self) -> None:
+        data = minimal_ledger()
+        data["sequences"]["BASE"] = 1
+        data["baselines"] = [self.baseline("4")]
+        findings = dashboard.validate_collection(
+            [("only", data), ("other", {"records": [{"id": "BASE-2026-000"}]})]
+        )
+        collisions = [f for f in findings if "BASE-2026-000" in f and "only" in f]
+        self.assertTrue(collisions, findings)
+        self.assertTrue(any("other" in f for f in collisions), collisions)
+
+    def test_a_record_before_the_baseline_holding_its_id_is_a_collision(
+        self,
+    ) -> None:
+        data = minimal_ledger()
+        data["sequences"]["BASE"] = 1
+        data["baselines"] = [self.baseline("4")]
+        findings = dashboard.validate_collection(
+            [("other", {"records": [{"id": "BASE-2026-000"}]}), ("only", data)]
+        )
+        collisions = [f for f in findings if "BASE-2026-000" in f and "only" in f]
+        self.assertTrue(collisions, findings)
+        self.assertTrue(any("other" in f for f in collisions), collisions)
+
+    def test_distinct_baseline_ids_still_verify(self) -> None:
+        data = minimal_ledger()
+        data["sequences"]["BASE"] = 2
+        second = self.baseline("5")
+        second["id"] = "BASE-2026-001"
+        data["baselines"] = [self.baseline("4"), second]
+        code, stdout, stderr = _capture_verify([self.write("one", data)])
+        self.assertEqual(code, 0, stdout + stderr)

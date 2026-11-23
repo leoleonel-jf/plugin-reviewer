@@ -22,6 +22,13 @@ giving one question two answers is worse than either. Run both when you want bot
 Differences use a closed vocabulary: `added`, `removed`, `changed` (a different digest),
 `state_changed`. Exit codes: `0` identical, `1` any difference, `2` a tool error.
 
+An entry is identified by `kind`, `scope`, `anchor` and `name`, so two MCP servers declared in one
+`config.toml` are two entries and taking one out is `removed` (from 0.14.0; pins have always
+carried `name`, so an older pin compares by the same key). One identity held twice, in the
+baseline or in the lockfile, has no single entry to compare and is refused as a tool error naming
+it. So is a `--from` or `generated_from` id that more than one baseline holds: the lock pins
+neither, and `verify` reports the duplicate.
+
 Only kinds an adapter marks `lockable` are pinned — the ones naming an installable artifact
 (`skill`, `plugin`, `mcp-server`, `agent`, `command`, `hook`). Instruction files, model settings,
 permission rules and environment variable names are deliberately left out: a lockfile that fails
