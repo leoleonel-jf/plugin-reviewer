@@ -11,7 +11,9 @@ could not read. Pull requests 43 to 45.
 
 - **`drift` asks a glob again** (finding 5). Every item a glob probe produces carries the pattern
   in `attributes.glob`, and `drift` expands it once more: a path it yields now that the baseline
-  does not hold is one row, `DRIFTED`, `appeared`. Before, a second Skill beside one that was
+  does not hold is one row, `DRIFTED`, `appeared`, held to the anchor the pattern names as `scan`
+  holds it; a match that resolves outside it is one `UNVERIFIABLE` row naming the pattern, never
+  its path. Before, a second Skill beside one that was
   captured exited `0` with no row for it. A match that went away is still that item's `MISSING`,
   never a second row. **What changes for you:** a baseline captured before 0.14.0 holds the
   matches and not the pattern; the report lists those patterns in the baseline's new
@@ -27,7 +29,7 @@ could not read. Pull requests 43 to 45.
   first. **What changes for you:** a ledger that already holds such a duplicate now fails `verify`,
   `build` and `update`;
 - **a file a parser could not read is a finding** (finding 9). `parse_failed` names the probe's
-  kind and the file; `parse_unavailable` is a TOML file on an interpreter without `tomllib`. Both
+  kind and the file, whether the read failed before the parser or inside it; `parse_unavailable` is a TOML file on an interpreter without `tomllib`. Both
   exit `1` and `update --strict` refuses to append, where before an incomplete `config.toml` gave
   `findings: []` and a baseline without its servers. A key the file does not have is still an
   ordinary absence. **What changes for you:** on Python 3.10 a scan whose adapter parses an

@@ -1037,3 +1037,46 @@ class ParserCoverageTestCase(UpdateFixtureTestCase):
         codes = [f["code"] for f in summary["findings"]]
         self.assertEqual(codes, ["parse_unavailable"], summary)
         self.assertIn("$USER_CONFIG/config.toml", summary["findings"][0]["message"])
+
+
+class ReadBeforeParseTests(ParserCoverageTestCase):
+    """A read that fails before the parser is a finding too (Eve, 0.14.0).
+
+    For a `parse` probe the first read hashes the file. When it failed, the
+    item carried only `reason: "unreadable"`, no `parse_error`, and the run had
+    no finding: `--strict` appended a baseline that held nothing of the file.
+    The failure is injected at the read boundary, `file_digest`, because an
+    unreadable file cannot be arranged portably.
+    """
+
+    def unreadable(self, name: str):
+        real = scan_module.file_digest
+
+        def refuse(path):
+            if Path(path).name == name:
+                raise PermissionError("denied")
+            return real(path)
+
+        return mock.patch.object(scan_module, "file_digest", refuse)
+
+    def test_strict_update_refuses_a_parse_file_unreadable_before_parsing(
+        self,
+    ) -> None:
+        self.config("config.json", '{"mcpServers": {"alpha": {}}}')
+        with self.unreadable("config.json"):
+            code, ledger_path, before, summary = self.cli_update(
+                self.parse_adapter("json"), "--strict"
+            )
+        self.assertEqual(code, 1, summary)
+        self.assertEqual(ledger_path.read_bytes(), before)
+        found = self.parse_findings(summary)
+        self.assertEqual(len(found), 1, summary)
+        self.assertIn("$USER_CONFIG/config.json", found[0]["message"])
+        self.assertIn("neither the file's digest", found[0]["message"])
+
+    def test_an_unreadable_file_without_parse_is_unchanged(self) -> None:
+        with self.unreadable("CLAUDE.md"):
+            code, _ledger_path, _before, summary = self.cli_update(
+                self.adapter_path, "--strict"
+            )
+        self.assertEqual((code, summary["findings"]), (0, []))
