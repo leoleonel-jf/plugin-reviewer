@@ -243,6 +243,26 @@ def validate_suite(suite_path: Path = DEFAULT_SUITE) -> dict[str, Any]:
                 except SuiteError as exc:
                     errors.append(str(exc))
 
+        # `workspace` (0.16.0) is optional: a directory under the eval root
+        # that the runner copies to a fresh temporary directory, whose path
+        # replaces `{workspace}` in the prompt. It is for a case whose
+        # material has to be on disk, such as a bundle with a link to read.
+        if "workspace" in case:
+            workspace = case["workspace"]
+            if not isinstance(workspace, str) or not workspace:
+                errors.append(f"{label} workspace must be a non-empty string")
+            else:
+                try:
+                    workspace_path = resolve_contained(
+                        eval_root, workspace, f"{label} workspace"
+                    )
+                    if not workspace_path.is_dir():
+                        errors.append(f"{label} workspace is not a directory: {workspace}")
+                except SuiteError as exc:
+                    errors.append(str(exc))
+            if isinstance(case["prompt"], str) and "{workspace}" not in case["prompt"]:
+                errors.append(f"{label} prompt must name {{workspace}} when a workspace is given")
+
         resources = case["expected_resources"]
         if not isinstance(resources, list):
             errors.append(f"{label} expected_resources must be an array")
