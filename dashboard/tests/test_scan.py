@@ -3261,5 +3261,190 @@ class BaselinePlatformFieldTests(ScanTestCase):
         self.assertEqual(entry["platform"], sys.platform)
 
 
+class CodexNestedProjectSkillTests(unittest.TestCase):
+    """Finding 13 of the 2026-11-20 review: project skills above a monorepo module.
+
+    Codex reads `.agents/skills` in the working directory and in every
+    directory above it up to the repository root. Observed on codex-cli
+    0.146.0 (Windows, 2026-11-23) with `skills/list` from an isolated
+    app-server, no model invoked, on the tree `module_tree` builds: from the
+    module it listed the module's two skills, the intermediate directory's
+    one, and the root's two, the two homonyms as separate entries with their
+    own paths, and nothing above the root; a `.git` file marked the root as a
+    `.git` directory does; with no `.git` anywhere it listed the module's
+    skills only. Before 0.16.0 the adapter probed the module alone, and a
+    scan from it recorded two skills where the client loads five.
+    """
+
+    MODULE_SKILLS = {"child-only", "shared"}
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = self.tmp / "home"
+        self.codex_home = self.tmp / "codex-home"
+        self.home.mkdir()
+        self.codex_home.mkdir()
+
+    def skill(self, root: Path, name: str) -> None:
+        path = root / ".agents" / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\nname: {name}\ndescription: fixture {root.name}\n---\n",
+            encoding="utf-8",
+        )
+
+    def module_tree(self, marker: str | None = "dir") -> tuple[Path, Path]:
+        outside = self.tmp / "outside"
+        repo = outside / "repo"
+        module = repo / "packages" / "mod"
+        module.mkdir(parents=True)
+        if marker == "dir":
+            (repo / ".git").mkdir()
+        elif marker == "file":
+            (repo / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+        self.skill(outside, "above-root")
+        self.skill(repo, "root-only")
+        self.skill(repo, "shared")
+        self.skill(repo / "packages", "middle")
+        self.skill(module, "child-only")
+        self.skill(module, "shared")
+        return repo, module
+
+    def scan_from(self, project: Path) -> dict:
+        with mock.patch.dict(
+            os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        ):
+            entry, _notes, _findings, _code = scan_detail(
+                identifier="BASE-2026-000",
+                client="codex",
+                bundled=ADAPTERS_DIR,
+                project=project,
+                environ={"CODEX_HOME": str(self.codex_home)},
+                captured_on="2026-11-23",
+            )
+        return entry
+
+    @staticmethod
+    def present_skills(entry: dict) -> list[str]:
+        return sorted(
+            item["anchor"]
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        )
+
+    def test_codex_nested_project_reports_parent_and_child_skills(self) -> None:
+        _repo, module = self.module_tree()
+        entry = self.scan_from(module)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/child-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+                "$REPO_ROOT/.agents/skills/root-only/SKILL.md",
+                "$REPO_ROOT/.agents/skills/shared/SKILL.md",
+                "$REPO_ROOT/packages/.agents/skills/middle/SKILL.md",
+            ],
+        )
+
+    def test_each_level_keeps_the_pattern_that_found_it(self) -> None:
+        """`drift` re-asks every recorded pattern, one per directory walked."""
+        _repo, module = self.module_tree()
+        entry = self.scan_from(module)
+        globs = {
+            item["anchor"]: item["attributes"].get("glob")
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        }
+        self.assertEqual(
+            globs["$REPO_ROOT/packages/.agents/skills/middle/SKILL.md"],
+            "$REPO_ROOT/packages/.agents/skills/*/SKILL.md",
+        )
+        self.assertEqual(
+            globs["$REPO_ROOT/.agents/skills/root-only/SKILL.md"],
+            "$REPO_ROOT/.agents/skills/*/SKILL.md",
+        )
+
+    def test_an_empty_intermediate_level_is_recorded_as_looked_at(self) -> None:
+        repo, module = self.module_tree()
+        shutil.rmtree(repo / "packages" / ".agents")
+        entry = self.scan_from(module)
+        absent = [
+            item for item in entry["items"]
+            if item["kind"] == "skill"
+            and item["anchor"] == "$REPO_ROOT/packages/.agents/skills/*/SKILL.md"
+        ]
+        self.assertEqual(len(absent), 1, entry["items"])
+        self.assertEqual(absent[0]["state"], "not_present")
+        self.assertEqual(absent[0]["attributes"].get("reason"), "no_match")
+
+    def test_a_git_file_marks_the_root_as_a_git_directory_does(self) -> None:
+        _repo, module = self.module_tree(marker="file")
+        entry = self.scan_from(module)
+        self.assertIn(
+            "$REPO_ROOT/packages/.agents/skills/middle/SKILL.md",
+            self.present_skills(entry),
+        )
+
+    def test_without_a_repository_only_the_module_is_read(self) -> None:
+        _repo, module = self.module_tree(marker=None)
+        entry = self.scan_from(module)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/child-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+            ],
+        )
+        # Nothing above the module is read, as the client reads nothing there.
+        self.assertFalse(
+            [
+                item for item in entry["items"]
+                if item["kind"] == "skill" and "REPO_ROOT" in item["anchor"]
+            ],
+            entry["items"],
+        )
+
+    def test_a_bracket_in_a_directory_name_is_a_character_not_a_wildcard(
+        self,
+    ) -> None:
+        repo = self.tmp / "repo"
+        middle = repo / "pk[1]"
+        module = middle / "mod"
+        module.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.skill(middle, "middle")
+        # Would match `pk[1]` read as a character class, and must not be read.
+        self.skill(repo / "pk1", "decoy")
+        entry = self.scan_from(module)
+        present = [
+            item for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        ]
+        self.assertEqual(
+            [item["anchor"] for item in present],
+            ["$REPO_ROOT/pk[1]/.agents/skills/middle/SKILL.md"],
+        )
+        self.assertEqual(
+            present[0]["attributes"]["glob"],
+            "$REPO_ROOT/pk[[]1]/.agents/skills/*/SKILL.md",
+        )
+
+    def test_a_scan_from_the_root_records_each_skill_once(self) -> None:
+        repo, _module = self.module_tree()
+        entry = self.scan_from(repo)
+        anchors = [
+            item["anchor"] for item in entry["items"] if item["kind"] == "skill"
+        ]
+        self.assertEqual(len(anchors), len(set(anchors)), anchors)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/root-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

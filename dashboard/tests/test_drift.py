@@ -1726,3 +1726,73 @@ class BoundaryBeforeIdentityTests(GlobBoundaryTests):
     test_a_new_match_linked_into_another_anchor_is_refused = None
     test_a_new_match_linked_outside_every_anchor_is_refused = None
     test_a_new_match_linked_inside_the_anchor_is_an_addition = None
+
+
+class WalkUpDriftTests(GlobFixture):
+    """0.16.0: `drift` re-asks every level a walking probe recorded.
+
+    The probe reads `.agents/skills` from the project up to `$REPO_ROOT`, as
+    `codex.json` does (finding 13 of the 2026-11-20 review). A skill added
+    later in the directory between the module and the root is a new match
+    under that level's own recorded pattern.
+    """
+
+    PATTERN = "$PROJECT/.agents/skills/*/SKILL.md"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.module = self.repo / "packages" / "mod"
+        self.module.mkdir(parents=True)
+        (self.repo / ".git").mkdir()
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["anchors"] = dict(
+            document["anchors"],
+            **{"$PROJECT": ["."], "$REPO_ROOT": ["$ancestor:.git"]},
+        )
+        document["probes"] = [
+            {"kind": "skill", "scope": "project", "glob": self.PATTERN,
+             "up_to": "$REPO_ROOT"}
+        ]
+        return document
+
+    def skill_at(self, root: Path, name: str) -> Path:
+        return self.write(root / ".agents" / "skills" / name / "SKILL.md", f"# {name}\n")
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update", str(ledger), "ledger", "--adapter", str(self.adapter_path),
+            "--project", str(self.module),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift_arguments(self, ledger: Path) -> list[str]:
+        return ["drift", str(ledger), "--adapter", str(self.adapter_path),
+                "--project", str(self.module)]
+
+    def test_a_skill_added_between_module_and_root_is_reported(self) -> None:
+        self.skill_at(self.module, "child")
+        self.skill_at(self.repo, "root")
+        ledger = self.capture()
+        self.skill_at(self.repo / "packages", "middle")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(
+            states["$REPO_ROOT/packages/.agents/skills/*/SKILL.md"],
+            ("DRIFTED", "appeared"),
+        )
+        self.assertEqual(states["$PROJECT/.agents/skills/child/SKILL.md"][0], "IN_PLACE")
+        self.assertEqual(states["$REPO_ROOT/.agents/skills/root/SKILL.md"][0], "IN_PLACE")
+
+    def test_an_unchanged_walk_is_in_place(self) -> None:
+        self.skill_at(self.module, "child")
+        self.skill_at(self.repo / "packages", "middle")
+        self.skill_at(self.repo, "root")
+        code, report, err = self.drift(self.capture())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)

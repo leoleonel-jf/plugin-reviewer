@@ -1061,14 +1061,20 @@ class ShippedResolutionTests(unittest.TestCase):
     def adapter(name: str) -> dict:
         return json.loads((ADAPTERS_DIR / name).read_text(encoding="utf-8"))
 
-    def test_every_shipped_adapter_carries_adapter_version_2(self) -> None:
-        """Version 2 is the generation that declares resolution data."""
+    def test_every_shipped_adapter_carries_its_adapter_version(self) -> None:
+        """Version 2 is the generation that declares resolution data.
+
+        `codex.json` is at 3 from 0.16.0: it reads project skills up to the
+        repository root, so a baseline it captured before covers less, and
+        `drift` says the comparison crosses adapter versions.
+        """
+        expected = {"claude-code.json": 2, "codex.json": 3, "generic.json": 2}
         paths = sorted(ADAPTERS_DIR.glob("*.json"))
-        self.assertTrue(paths, f"no adapters found in {ADAPTERS_DIR}")
+        self.assertEqual({path.name for path in paths}, set(expected))
         for path in paths:
             with self.subTest(adapter=path.name):
                 data = json.loads(path.read_text(encoding="utf-8"))
-                self.assertEqual(data["adapter_version"], 2)
+                self.assertEqual(data["adapter_version"], expected[path.name])
 
     def test_claude_code_declares_exactly_the_researched_resolutions(self) -> None:
         self.assertEqual(
@@ -2243,6 +2249,112 @@ class PlatformGuardedCandidateTests(unittest.TestCase):
         )
         self.assertEqual(roots["MANAGED_CONFIG"], self.present)
         self.assertEqual(adapters.platform_excluded_anchors(adapter), frozenset())
+
+
+class WalkUpToRepositoryRootTests(unittest.TestCase):
+    """0.16.0, finding 13 of the 2026-11-20 review: `up_to` and `$ancestor:`."""
+
+    @staticmethod
+    def adapter(probe: dict, *, repo: list[str] | None = None) -> dict:
+        data = minimal_adapter()
+        data["anchors"]["$REPO_ROOT"] = repo if repo is not None else ["$ancestor:.git"]
+        data["probes"] = [probe]
+        return data
+
+    def findings(self, data: dict) -> list[str]:
+        return adapters.validate_adapter(data, source="t")
+
+    def probe(self, **overrides: object) -> dict:
+        probe = {
+            "kind": "skill",
+            "scope": "project",
+            "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+            "up_to": "$REPO_ROOT",
+        }
+        probe.update(overrides)
+        return probe
+
+    def test_the_shipped_codex_adapter_walks_its_project_skills_up_to_the_root(
+        self,
+    ) -> None:
+        data = json.loads((ADAPTERS_DIR / "codex.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["anchors"]["$REPO_ROOT"], ["$ancestor:.git"])
+        walking = [probe for probe in data["probes"] if "up_to" in probe]
+        self.assertEqual(
+            walking,
+            [
+                {
+                    "kind": "skill",
+                    "scope": "project",
+                    "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+                    "up_to": "$REPO_ROOT",
+                    "lockable": True,
+                }
+            ],
+        )
+
+    def test_a_valid_walk_is_accepted(self) -> None:
+        self.assertEqual(self.findings(self.adapter(self.probe())), [])
+
+    def test_up_to_on_a_literal_path_is_refused(self) -> None:
+        probe = self.probe(path="$PROJECT/AGENTS.md")
+        del probe["glob"]
+        findings = self.findings(self.adapter(probe))
+        self.assertTrue(any("up_to requires glob" in f for f in findings), findings)
+
+    def test_up_to_naming_an_undeclared_anchor_is_refused(self) -> None:
+        findings = self.findings(self.adapter(self.probe(up_to="$NOWHERE")))
+        self.assertTrue(any("does not declare" in f for f in findings), findings)
+
+    def test_up_to_naming_the_probe_s_own_anchor_is_refused(self) -> None:
+        findings = self.findings(self.adapter(self.probe(up_to="$PROJECT")))
+        self.assertTrue(any("own anchor" in f for f in findings), findings)
+
+    def test_up_to_that_is_not_an_anchor_reference_is_refused(self) -> None:
+        for value in ("REPO_ROOT", "$repo", "", 3, None):
+            with self.subTest(value=value):
+                findings = self.findings(self.adapter(self.probe(up_to=value)))
+                self.assertTrue(
+                    any("up_to must name an anchor" in f for f in findings), findings
+                )
+
+    def test_a_malformed_ancestor_candidate_is_refused(self) -> None:
+        for candidate in (
+            "$ancestor:", "$ancestor:.", "$ancestor:..", "$ancestor:a/b",
+            "$ancestor:a\\b", "$ancestor:C:x", "$ancestor:a\0b",
+        ):
+            with self.subTest(candidate=candidate):
+                findings = self.findings(
+                    self.adapter(self.probe(), repo=[candidate])
+                )
+                self.assertTrue(
+                    any("malformed $ancestor:" in f for f in findings), findings
+                )
+
+    def test_the_nearest_directory_holding_the_marker_is_the_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp).resolve()
+            (outer / ".git").mkdir()
+            repo = outer / "repo"
+            module = repo / "a" / "b"
+            module.mkdir(parents=True)
+            (repo / ".git").write_text("gitdir: x\n", encoding="utf-8")
+            roots, unresolved = adapters.resolve_anchor_roots(
+                self.adapter(self.probe()), project=module, environ={}
+            )
+        self.assertEqual(roots["REPO_ROOT"], repo)
+        self.assertNotIn("REPO_ROOT", unresolved)
+
+    def test_no_marker_anywhere_leaves_the_anchor_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            module = Path(tmp).resolve() / "a"
+            module.mkdir()
+            with mock.patch.object(os.path, "lexists", return_value=False):
+                roots, unresolved = adapters.resolve_anchor_roots(
+                    self.adapter(self.probe()), project=module, environ={}
+                )
+        self.assertNotIn("REPO_ROOT", roots)
+        self.assertIn("REPO_ROOT", unresolved)
 
 
 if __name__ == "__main__":
