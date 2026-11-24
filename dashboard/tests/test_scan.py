@@ -3358,11 +3358,11 @@ class CodexNestedProjectSkillTests(unittest.TestCase):
         }
         self.assertEqual(
             globs["$REPO_ROOT/packages/.agents/skills/middle/SKILL.md"],
-            "$REPO_ROOT/packages/.agents/skills/*/SKILL.md",
+            "$REPO_ROOT/packages/.agents/skills/**/SKILL.md",
         )
         self.assertEqual(
             globs["$REPO_ROOT/.agents/skills/root-only/SKILL.md"],
-            "$REPO_ROOT/.agents/skills/*/SKILL.md",
+            "$REPO_ROOT/.agents/skills/**/SKILL.md",
         )
 
     def test_an_empty_intermediate_level_is_recorded_as_looked_at(self) -> None:
@@ -3372,7 +3372,7 @@ class CodexNestedProjectSkillTests(unittest.TestCase):
         absent = [
             item for item in entry["items"]
             if item["kind"] == "skill"
-            and item["anchor"] == "$REPO_ROOT/packages/.agents/skills/*/SKILL.md"
+            and item["anchor"] == "$REPO_ROOT/packages/.agents/skills/**/SKILL.md"
         ]
         self.assertEqual(len(absent), 1, entry["items"])
         self.assertEqual(absent[0]["state"], "not_present")
@@ -3427,7 +3427,7 @@ class CodexNestedProjectSkillTests(unittest.TestCase):
         )
         self.assertEqual(
             present[0]["attributes"]["glob"],
-            "$REPO_ROOT/pk[[]1]/.agents/skills/*/SKILL.md",
+            "$REPO_ROOT/pk[[]1]/.agents/skills/**/SKILL.md",
         )
 
     def test_a_scan_from_the_root_records_each_skill_once(self) -> None:
@@ -3444,6 +3444,157 @@ class CodexNestedProjectSkillTests(unittest.TestCase):
                 "$PROJECT/.agents/skills/shared/SKILL.md",
             ],
         )
+
+
+class CodexSkillTreeTests(CodexNestedProjectSkillTests):
+    """Eve's review of 0.16.0: inside a skills root Codex walks a tree, not one level.
+
+    codex-cli 0.146.0, `skills/list` from an isolated app-server on
+    2026-11-23, one repository root: it listed a `SKILL.md` directly in
+    `.agents/skills`, and at depths 1 to 6 below it, not 7 or 8; two skills
+    under a group directory; one under `node_modules/`; nothing under
+    `.hidden/` or `group/.cache/`. Its loader says the same
+    (`MAX_SCAN_DEPTH` 6, hidden directories skipped).
+    """
+
+    def at(self, base: Path, relative: str) -> None:
+        path = base / ".agents" / "skills" / relative / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\nname: x\ndescription: fixture\n---\n", encoding="utf-8")
+
+    def tree(self, base: Path) -> None:
+        self.at(base, ".")
+        self.at(base, "/".join(f"d{n}" for n in range(1, 9)))
+        for depth in range(1, 8):
+            # One SKILL.md at every depth of the same chain.
+            self.at(base, "/".join(f"d{n}" for n in range(1, depth + 1)))
+        self.at(base, "group/alpha")
+        self.at(base, "group/beta")
+        self.at(base, ".hidden/secret")
+        self.at(base, "group/.cache/x")
+        self.at(base, "node_modules/pkg")
+
+    def expected(self, anchor: str) -> list[str]:
+        chain = [""] + ["/".join(f"d{n}" for n in range(1, depth + 1)) + "/"
+                        for depth in range(1, 7)]
+        relatives = [*chain, "group/alpha/", "group/beta/", "node_modules/pkg/"]
+        return sorted(f"{anchor}/.agents/skills/{rel}SKILL.md" for rel in relatives)
+
+    def test_a_project_root_is_walked_six_levels_deep_past_hidden_directories(
+        self,
+    ) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        self.tree(repo)
+        entry = self.scan_from(repo)
+        self.assertEqual(self.present_skills(entry), self.expected("$PROJECT"))
+
+    def test_a_parent_level_is_walked_the_same_way(self) -> None:
+        repo = self.tmp / "repo"
+        module = repo / "mod"
+        module.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.tree(repo)
+        entry = self.scan_from(module)
+        self.assertEqual(self.present_skills(entry), self.expected("$REPO_ROOT"))
+
+    def test_every_item_records_the_limits_beside_its_pattern(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        self.at(repo, "group/alpha")
+        entry = self.scan_from(repo)
+        skills = [
+            item for item in entry["items"]
+            if item["kind"] == "skill"
+            and item["attributes"].get("reason") != "unresolved_anchor"
+        ]
+        self.assertTrue(skills)
+        for item in skills:
+            with self.subTest(anchor=item["anchor"]):
+                self.assertTrue(item["attributes"]["glob"].endswith("/**/SKILL.md"))
+                self.assertEqual(item["attributes"]["max_depth"], 6)
+                self.assertIs(item["attributes"]["skip_hidden"], True)
+
+    def test_the_skills_codex_caches_are_their_own_system_layer(self) -> None:
+        cached = self.codex_home / "skills" / ".system" / "imagegen" / "SKILL.md"
+        cached.parent.mkdir(parents=True)
+        cached.write_text("---\nname: imagegen\ndescription: x\n---\n", encoding="utf-8")
+        user = self.codex_home / "skills" / "mine" / "SKILL.md"
+        user.parent.mkdir(parents=True)
+        user.write_text("---\nname: mine\ndescription: x\n---\n", encoding="utf-8")
+        project = self.tmp / "project"
+        project.mkdir()
+        entry = self.scan_from(project)
+        scopes = {
+            item["anchor"]: item["attributes"].get("scope")
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        }
+        self.assertEqual(
+            scopes,
+            {
+                "$USER_CONFIG/skills/.system/imagegen/SKILL.md": "system",
+                "$USER_CONFIG/skills/mine/SKILL.md": "user",
+            },
+        )
+
+    def test_a_link_to_a_directory_is_not_followed(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        outside = self.tmp / "elsewhere" / "linked"
+        outside.mkdir(parents=True)
+        (outside / "SKILL.md").write_text("x", encoding="utf-8")
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        link = repo / ".agents" / "skills" / "linked"
+        junction = False
+        try:
+            os.symlink(outside, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            if os.name != "nt":
+                self.skipTest("cannot create a directory link here")
+            # Without the symlink privilege, a junction: `os.walk` walks it.
+            done = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                capture_output=True,
+            )
+            if done.returncode != 0:
+                self.skipTest("cannot create a junction here")
+            junction = True
+        entry = self.scan_from(repo)
+        # Never recorded as a skill of this root, followed or not.
+        self.assertEqual(self.present_skills(entry), [])
+        if junction:
+            refused = [
+                item for item in entry["items"]
+                if item["kind"] == "skill"
+                and item["attributes"].get("reason") in PATH_SAFETY_REASONS
+            ]
+            self.assertEqual(len(refused), 1, entry["items"])
+
+
+class MalformedWalkLimitTests(unittest.TestCase):
+    """A hand-built probe with malformed limits is recorded, not walked without them."""
+
+    def test_a_malformed_limit_is_a_malformed_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "skills" / "deep" / "x").mkdir(parents=True)
+            (root / "skills" / "deep" / "x" / "SKILL.md").write_text("x", encoding="utf-8")
+            for limits in ({"max_depth": "6"}, {"max_depth": -1}, {"skip_hidden": "yes"}):
+                with self.subTest(limits=limits):
+                    probe = {"kind": "skill", "glob": "$USER_CONFIG/skills/**/SKILL.md", **limits}
+                    items = run_probe(probe, {"USER_CONFIG": root}, [])
+                    self.assertEqual(len(items), 1, items)
+                    self.assertEqual(items[0]["state"], "not_present")
+                    self.assertEqual(items[0]["attributes"]["reason"], "malformed_probe")
+
+
+# The fixture is shared; the parent's tests run once, under the parent.
+for _name in [name for name in vars(CodexNestedProjectSkillTests) if name.startswith("test_")]:
+    setattr(CodexSkillTreeTests, _name, None)
 
 
 if __name__ == "__main__":

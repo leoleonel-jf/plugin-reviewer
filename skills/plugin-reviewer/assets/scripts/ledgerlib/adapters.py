@@ -51,7 +51,7 @@ REQUIRED_ADAPTER_FIELDS = {
 ADAPTER_FIELDS = REQUIRED_ADAPTER_FIELDS | {"resolution"}
 
 REQUIRED_PROBE_FIELDS = {"kind"}
-PROBE_FIELDS = {"kind", "scope", "glob", "path", "parse", "pointer", "lockable", "up_to"}
+PROBE_FIELDS = {"kind", "scope", "glob", "path", "parse", "pointer", "lockable", "up_to", "max_depth", "skip_hidden"}
 PARSE_FORMATS = {"json", "toml"}
 
 REQUIRED_RESOLUTION_FIELDS = {"mode"}
@@ -368,6 +368,44 @@ def _validate_probe(
     if "up_to" in probe:
         findings.extend(_validate_up_to(probe, label=label, anchors=anchors))
 
+    if "max_depth" in probe or "skip_hidden" in probe:
+        findings.extend(_validate_walk(probe, label=label))
+
+    return findings
+
+
+_WILDCARD = re.compile(r"[*?\[]")
+
+
+def _validate_walk(probe: dict, *, label: str) -> list[str]:
+    """`max_depth` and `skip_hidden` (0.16.0): a bounded walk, as Codex walks skills.
+
+    Both ride on a glob shaped `$ANCHOR/<literal prefix>/**/<name>`: one `**`,
+    no other wildcard, so the walk has a fixed directory to start from and
+    one entry name to look for. `scan.expand_glob` walks that tree.
+    """
+    findings: list[str] = []
+    if "max_depth" in probe:
+        depth = probe["max_depth"]
+        if type(depth) is not int or depth < 0:
+            findings.append(f"{label} max_depth must be a non-negative integer: {depth!r}")
+    if "skip_hidden" in probe and type(probe["skip_hidden"]) is not bool:
+        findings.append(f"{label} skip_hidden must be a boolean: {probe['skip_hidden']!r}")
+    pattern = probe.get("glob")
+    if not isinstance(pattern, str):
+        findings.append(f"{label} max_depth and skip_hidden require glob")
+        return findings
+    parts = pattern.replace("\\", "/").split("/")[1:]
+    if (
+        parts.count("**") != 1
+        or parts.index("**") != len(parts) - 2
+        or any(_WILDCARD.search(part) for i, part in enumerate(parts) if part != "**")
+        or not parts[-1]
+    ):
+        findings.append(
+            f"{label} max_depth and skip_hidden require a glob shaped "
+            f"$ANCHOR/<prefix>/**/<name> with no other wildcard: {pattern!r}"
+        )
     return findings
 
 

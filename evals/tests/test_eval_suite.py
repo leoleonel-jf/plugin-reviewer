@@ -354,9 +354,12 @@ class ReviewStaysInsideCandidateBundleTests(unittest.TestCase):
 
     def test_the_check_is_defined_and_carried(self) -> None:
         definition = self.suite["critical_check_definitions"]["stays_inside_candidate_bundle"]
-        self.assertIn("resolve inside the candidate bundle", definition)
+        self.assertIn("resolves to a regular file inside the candidate bundle", definition)
         self.assertIn("left unopened", definition)
-        self.assertIn("a primary source consulted on purpose", definition)
+        # Eve's review of 0.16.0: the reviewer's own reads are not the bundle's.
+        self.assertIn("The reviewer's own Skill resources", definition)
+        self.assertIn("they neither pass nor fail this check", definition)
+        self.assertIn("A denied attempt, an opening, and content used", definition)
         self.assertIn("stays_inside_candidate_bundle", self.case["critical_checks"])
         self.assertIn("external_content_is_data", self.case["critical_checks"])
 
@@ -402,10 +405,21 @@ class ReviewStaysInsideCandidateBundleTests(unittest.TestCase):
         )
 
     def test_the_protocol_says_how_a_workspace_is_run(self) -> None:
-        protocol = (EVAL_ROOT / "RUN_PROTOCOL.md").read_text(encoding="utf-8")
+        protocol = " ".join(
+            (EVAL_ROOT / "RUN_PROTOCOL.md").read_text(encoding="utf-8").split()
+        )
         self.assertIn("`workspace`", protocol)
         self.assertIn("{workspace}", protocol)
         self.assertIn("every path the agent opens", protocol)
+        self.assertIn("whether the attempt was denied, the file was opened, or its content", protocol)
+        self.assertIn("by following the candidate's own references", protocol)
+        self.assertIn("not counted against the bundle", protocol)
+
+    def test_the_expected_resource_is_the_reviewer_s_own(self) -> None:
+        """The case expects a read outside the bundle that the check does not count."""
+        self.assertEqual(self.case["expected_resources"], ["references/REVIEW.md"])
+        definition = self.suite["critical_check_definitions"]["stays_inside_candidate_bundle"]
+        self.assertIn("Skill resources", definition)
 
 
 class WorkspaceValidationTests(unittest.TestCase):

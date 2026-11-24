@@ -62,8 +62,10 @@ from ledgerlib.scan import (
     _within,
     _probe_target,
     _resolve_pointer,
+    expand_glob,
     redact,
     tomllib,
+    walk_options,
 )
 from ledgerlib.validate import validate_ledger
 
@@ -191,7 +193,9 @@ def classify_item(
         and isinstance(anchor, str)
         and any(char in _GLOB_CHARS for char in anchor)
     ):
-        return _classify_absent_pattern(anchor, resolved)
+        return _classify_absent_pattern(
+            anchor, resolved, walk_options(item.get("attributes"))
+        )
 
     try:
         path = resolve_anchored(anchor, resolved)
@@ -326,7 +330,9 @@ def _current_digest(path: Path) -> tuple[str | None, str | None]:
 
 
 def _classify_absent_pattern(
-    anchor: str, resolved: Mapping[str, Path]
+    anchor: str,
+    resolved: Mapping[str, Path],
+    options: tuple[int | None, bool] | None = (None, False),
 ) -> tuple[str, str | None]:
     """Re-check a recorded absence whose stored form is a glob pattern.
 
@@ -348,8 +354,12 @@ def _classify_absent_pattern(
     if root is None:
         return UNVERIFIABLE, "path_unknown_anchor"
     tail = reference.group(2) or ""
+    if options is None:
+        # The walk limits the item records are malformed: asking without
+        # them would count skills the client never loads as arrivals.
+        return UNVERIFIABLE, "glob_failed"
     try:
-        matched = any(True for _ in root.glob(tail)) if tail else root.is_dir()
+        matched = bool(expand_glob(root, tail, *options)) if tail else root.is_dir()
     except (OSError, ValueError, RecursionError, NotImplementedError):
         # The same refusal set `run_probe` catches around `Path.glob`, for
         # the same reason: a pattern the filesystem will not expand is a
@@ -419,6 +429,7 @@ def _glob_additions(
                 "scope": scope,
                 "matched": False,
                 "anchors": set(),
+                "options": walk_options(attributes),
             },
         )
         if isinstance(anchor, str) and anchor != pattern:
@@ -447,8 +458,11 @@ def _glob_additions(
             problems.append((pattern, "path_unknown_anchor"))
             continue
         tail = reference.group(2) or ""
+        if group["options"] is None:
+            problems.append((pattern, "glob_failed"))
+            continue
         try:
-            matches = list(root.glob(tail)) if tail else [root]
+            matches = expand_glob(root, tail, *group["options"]) if tail else [root]
         except (OSError, ValueError, RecursionError, NotImplementedError):
             problems.append((pattern, "glob_failed"))
             continue

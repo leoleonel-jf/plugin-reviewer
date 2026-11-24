@@ -1796,3 +1796,94 @@ class WalkUpDriftTests(GlobFixture):
         code, report, err = self.drift(self.capture())
         self.assertEqual(code, 0, err)
         self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+
+
+class BoundedWalkDriftTests(GlobFixture):
+    """Eve's review of 0.16.0: `drift` walks a skills root with the limits `scan` used.
+
+    Without them a skill seven levels down, or under a hidden directory, both
+    of which Codex never loads, would come back as configuration arriving.
+    """
+
+    PATTERN = "$PROJECT/.agents/skills/**/SKILL.md"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp / "proj"
+        self.project.mkdir()
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["anchors"] = dict(document["anchors"], **{"$PROJECT": ["."]})
+        document["probes"] = [
+            {"kind": "skill", "scope": "project", "glob": self.PATTERN,
+             "max_depth": 6, "skip_hidden": True}
+        ]
+        return document
+
+    def at(self, relative: str) -> Path:
+        return self.write(self.project / ".agents" / "skills" / relative / "SKILL.md", "# s\n")
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update", str(ledger), "ledger", "--adapter", str(self.adapter_path),
+            "--project", str(self.project),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift_arguments(self, ledger: Path) -> list[str]:
+        return ["drift", str(ledger), "--adapter", str(self.adapter_path),
+                "--project", str(self.project)]
+
+    DEEP = "/".join(f"d{n}" for n in range(1, 8))
+
+    def test_what_codex_never_loads_is_not_an_arrival(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        self.at(self.DEEP)
+        self.at(".hidden/secret")
+        self.at("group/.cache/x")
+        code, report, err = self.drift(ledger)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+
+    def test_a_nested_skill_that_codex_loads_is_an_arrival(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        self.at("group/beta")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(
+            states["$PROJECT/.agents/skills/group/beta/SKILL.md"], ("DRIFTED", "appeared")
+        )
+
+    def test_an_empty_root_stays_empty_for_what_codex_never_loads(self) -> None:
+        (self.project / ".agents" / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        self.at(".hidden/secret")
+        self.at(self.DEEP)
+        code, report, err = self.drift(ledger)
+        self.assertEqual(code, 0, err)
+        self.at("a/b")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(states[self.PATTERN], ("DRIFTED", "appeared"))
+
+    def test_malformed_recorded_limits_are_unverifiable_not_walked(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"]["max_depth"] = "deep"
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at("group/beta")
+        code, report, stderr = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertFalse(
+            [row for row in rows if row["anchor"].endswith("group/beta/SKILL.md")], rows
+        )
+        self.assertIn("glob_failed", json.dumps(report) + stderr)

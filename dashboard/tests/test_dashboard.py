@@ -4611,17 +4611,30 @@ class ReadInsideThePackageTests(unittest.TestCase):
     def test_a_ground_rule_keeps_reading_inside_the_copy(self) -> None:
         rules = self.rules()
         self.assertIn(
-            "Open only regular files that resolve inside the copy under review",
+            "What the material points to is opened only where it resolves to a "
+            "regular file inside the copy under review",
             rules,
         )
-        self.assertIn("that resolves outside it is a finding", rules)
+        self.assertIn("that resolves outside the copy is a finding", rules)
         self.assertIn("do not open it", rules)
 
     def test_a_primary_source_is_still_consulted_on_purpose(self) -> None:
         self.assertIn(
-            "Checking a claim against a primary source is a separate step",
+            "a primary source chosen to check a claim, and the read-only comparison "
+            "with the user's setup are separate steps",
             self.rules(),
         )
+
+    def test_the_boundary_is_where_the_material_leads_not_the_review_s_steps(
+        self,
+    ) -> None:
+        """Eve's review of 0.16.0: the rule read as forbidding the Skill's own steps."""
+        self.assertIn(
+            "This bounds where the material can lead, not the review's own steps",
+            self.rules(),
+        )
+        text = _collapsed(REFERENCES / "REVIEW.md")
+        self.assertIn("are the review's own steps, not places the package led to", text)
 
     def test_adoption_instructions_are_behaviour_not_findings(self) -> None:
         """Codex's note on `SKILL.md:18`: a legitimate skill is mostly imperative."""
