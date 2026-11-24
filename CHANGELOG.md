@@ -7,17 +7,19 @@ All notable changes to this project are documented in this file.
 Three medium findings of the independent review of 2026-11-20 about what the tool writes and where
 it looks while writing: an overwrite guard that recognized a string, an `update all` that spent a
 baseline ID on every refused retry, and a local build that asked a network share whether a project
-still existed. Pull requests 49 to 51, and 53 for the review of the release.
+still existed. Pull requests 49 to 51, and 53 and 54 for the reviews of the release.
 
 - **The overwrite guard recognizes the artifact, not a string** (finding 12). `build` accepted any
   file holding `id="aio-payload"` and `lock --out` any file holding `"lock_version"`, so a document
   or schema that only described the format was consumed by a mistyped `--out`. Now the existing
-  file must have the whole shape of what this tool writes: a page that opens with
+  file must have the whole shape of what this tool writes (a structural check, not proof of who
+  wrote it): a page that opens with
   `<!DOCTYPE html>`, closes with `</html>`, and holds the `aio-payload` island with a payload and
   the `aio-i18n` island with the dictionaries, as every shell since 0.4.0 does; or a lockfile with
   exactly the keys the writer has always written, `lock_version` 1, and entries of the entry shape.
   A document that quotes a valid island, or a JSON object that borrows `lock_version` and
-  `entries`, is refused. A link at `--out` is refused. The lockfile is written atomically, like the
+  `entries`, is refused. A link at `--out` is refused, decided from the link itself without asking
+  about its target. The lockfile is written atomically, like the
   dashboard, and a failed write exits `2` with the previous lockfile intact. `--force` means the
   same for `build`, `update` and `lock`: replace a file the guard does not recognize, and replace a
   link with a regular file, never writing through it; a directory at `--out` is refused even with

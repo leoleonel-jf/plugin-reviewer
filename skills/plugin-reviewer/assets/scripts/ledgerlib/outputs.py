@@ -18,6 +18,8 @@ refused with or without `--force`.
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -42,14 +44,21 @@ def guard_output(
     0.15.0). An existing regular file passes only when `recognizes` accepts
     its bytes. `force` skips the link refusal and the recognizer, nothing
     else. A failure to inspect `out` is a `LedgerError` naming it.
+
+    Every decision comes from one `os.lstat` of `out` itself, which never
+    follows a link: a link is handled before anything could ask about its
+    target, so a remote target is never contacted and a target that cannot
+    be inspected never blocks a `--force` that only replaces the link (Eve's
+    second review of 0.15.0). The file's bytes are read only once `out` is
+    known to be a regular file and not a link.
     """
     try:
-        is_link = out.is_symlink()
-        exists = out.exists()
-        is_file = out.is_file()
+        status = os.lstat(out)
+    except FileNotFoundError:
+        return
     except OSError as exc:
         raise LedgerError(f"cannot inspect {str(out)!r}: {exc}") from exc
-    if is_link:
+    if stat.S_ISLNK(status.st_mode):
         if force:
             return
         raise LedgerError(
@@ -57,9 +66,7 @@ def guard_output(
             "replace the link itself with a regular file (its target is never "
             "written)"
         )
-    if not exists:
-        return
-    if not is_file:
+    if not stat.S_ISREG(status.st_mode):
         raise LedgerError(
             f"refusing to overwrite {str(out)!r}: it is not a regular file"
         )
