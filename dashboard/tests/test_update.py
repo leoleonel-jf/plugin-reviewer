@@ -22,7 +22,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,6 +49,28 @@ from ledgerlib import build as build_module  # noqa: E402
 from ledgerlib.build import build_command  # noqa: E402
 from ledgerlib.chain import chain_head, seal_ledger  # noqa: E402
 from ledgerlib.errors import LedgerError  # noqa: E402
+
+
+LINK_STAT = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+
+def lstat_for(target: Path, result: object):
+    """An `os.lstat` that answers `result` for `target` and is real elsewhere.
+
+    The guard decides on `--out` from one `lstat` (Eve's R2 of 0.15.0), so
+    faking that one call is how a test shows it a link, or an inspection
+    that fails, without creating a real link.
+    """
+    real = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return real(path, *args, **kwargs)
+
+    return fake
 from ledgerlib.update import (  # noqa: E402
     WHAT_CHOICES,
     next_baseline_id,
@@ -791,13 +815,33 @@ class UpdateAllRecoveryTestCase(UpdateFixtureTestCase):
         self.give_the_probe_something_to_find()
         ledger_path = self.write_ledger(self.bare_ledger())
         before = ledger_path.read_bytes()
-        with mock.patch("pathlib.Path.is_symlink", side_effect=OSError("denied")):
+        out = self.tmp / "dashboard.html"
+        with mock.patch("os.lstat", side_effect=lstat_for(out, OSError("denied"))):
             code, stdout, err = self.run_update(
                 ledger_path, "all", adapter=self.adapter_path, today="2026-08-01"
             )
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(stdout)["refused"], "output")
         self.assertIn("denied", err)
+        self.assertEqual(ledger_path.read_bytes(), before)
+
+    def test_update_all_refuses_a_page_with_an_unhashable_mode(self) -> None:
+        """A `TypeError` in the recognizer would skip the refusal JSON (Eve's R2)."""
+        self.give_the_probe_something_to_find()
+        ledger_path = self.write_ledger(self.bare_ledger())
+        before = ledger_path.read_bytes()
+        out = self.tmp / "dashboard.html"
+        out.write_text(
+            build_module.TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+                '"mode":"static"', '"mode":{}', 1
+            ),
+            encoding="utf-8",
+        )
+        code, stdout, _err = self.run_update(
+            ledger_path, "all", adapter=self.adapter_path, today="2026-08-01"
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(stdout)["refused"], "output")
         self.assertEqual(ledger_path.read_bytes(), before)
 
     def test_a_clean_all_reports_no_failed_step(self) -> None:

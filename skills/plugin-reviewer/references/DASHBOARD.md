@@ -35,12 +35,14 @@ dashboard.py build LEDGER [--out PATH] [--lang CODE] [--force]
 | `--force` | Overrides the overwrite guard (see below). |
 | `--project`, `--adapter`, `--user-config` | Same meaning as for `scan`/`drift`: they feed the `computed.drift` and `computed.previews` sub-computations. |
 
-**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file is
-itself a whole page this tool wrote: it opens with `<!DOCTYPE html>` and closes with `</html>`, its
+**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file has
+the whole shape of a page this tool writes (a structural check, not proof of who wrote it): it
+opens with `<!DOCTYPE html>` and closes with `</html>`, its
 one `aio-payload` island holds a payload (`payload_schema`, `mode` `static` or `built`), and its
 `aio-i18n` island holds the dictionaries. Every shell since 0.4.0 has that shape. A document that
 quotes the tag, even with a valid payload, is refused (from 0.15.0; before, the marker text alone
-passed). A link at `--out` is refused too. `--force` means the same for `build`, `update` and
+passed). A link at `--out` is refused too, decided from the link itself without asking about its
+target. `--force` means the same for `build`, `update` and
 `lock`: the file at `--out` is replaced even when it is not recognized, and a link is replaced by
 a regular file, never written through. A directory at `--out` is refused with or without
 `--force`. This is the first ledger-adjacent command that writes; it writes exactly one file,

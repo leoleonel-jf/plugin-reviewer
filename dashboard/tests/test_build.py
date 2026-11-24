@@ -30,6 +30,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -65,6 +66,29 @@ from ledgerlib.build import (  # noqa: E402
 )
 from ledgerlib.constants import TOOL_VERSION  # noqa: E402
 from ledgerlib.errors import LedgerError  # noqa: E402
+from ledgerlib.outputs import guard_output  # noqa: E402
+
+
+LINK_STAT = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+
+def lstat_for(target: Path, result: object):
+    """An `os.lstat` that answers `result` for `target` and is real elsewhere.
+
+    The guard decides on `--out` from one `lstat` (Eve's R2 of 0.15.0), so
+    faking that one call is how a test shows it a link, or an inspection
+    that fails, without creating a real link.
+    """
+    real = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return real(path, *args, **kwargs)
+
+    return fake
 
 
 def extract_island(html: str) -> str:
@@ -865,10 +889,59 @@ class OutputGuardIdentityTests(BuildTestCase):
 
     def test_a_failure_to_inspect_out_is_a_ledger_error(self) -> None:
         out = self.tmp / "dashboard.html"
-        with mock.patch("pathlib.Path.is_symlink", side_effect=OSError("denied")):
+        with mock.patch("os.lstat", side_effect=lstat_for(out, OSError("denied"))):
             with self.assertRaises(LedgerError) as ctx:
                 write_dashboard("<html>new</html>", out, force=False)
         self.assertIn("denied", str(ctx.exception))
+
+    def test_the_guard_never_asks_about_a_link_target(self) -> None:
+        """The decision on a link is made from the link alone (Eve's R2 of 0.15.0).
+
+        `exists()` and `is_file()` follow a link, so asking them before the
+        link is handled can reach a remote target, or fail on one and refuse
+        a `--force` that would only have replaced the link.
+        """
+        out = self.tmp / "dashboard.html"
+        out.write_text("a target that must not be asked about", encoding="utf-8")
+        followed: list[str] = []
+        real_stat = os.stat
+
+        def recording_stat(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(out):
+                followed.append(os.fspath(path))
+            return real_stat(path, *args, **kwargs)
+
+        for force in (False, True):
+            with self.subTest(force=force), mock.patch(
+                "os.lstat", side_effect=lstat_for(out, LINK_STAT)
+            ), mock.patch("os.stat", side_effect=recording_stat):
+                if force:
+                    guard_output(out, force=True, recognizes=lambda data: False,
+                                 artifact="a test artifact")
+                else:
+                    with self.assertRaises(LedgerError):
+                        guard_output(out, force=False, recognizes=lambda data: False,
+                                     artifact="a test artifact")
+            self.assertEqual(followed, [])
+
+    def test_a_payload_mode_of_another_json_type_is_a_refusal(self) -> None:
+        """An unhashable `mode` is not recognized, never a `TypeError` (Eve's R2)."""
+        page = TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+            '"mode":"static"', '"mode":[]', 1
+        )
+        self.assertIn('"mode":[]', page)
+        self.assertFalse(looks_like_dashboard(page.encode("utf-8")))
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "dashboard.html"
+        out.write_text(page, encoding="utf-8")
+        before = out.read_bytes()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, out, None, False)
+        self.assertEqual(code, 1)
+        self.assertIn("refusing to overwrite", err.getvalue())
+        self.assertEqual(out.read_bytes(), before)
 
     def test_a_template_that_is_not_utf8_exits_one(self) -> None:
         ledger_path = self.tmp / "ledger.json"
@@ -896,7 +969,7 @@ class OutputGuardIdentityTests(BuildTestCase):
         out = self.tmp / "dashboard.html"
         out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         before = out.read_bytes()
-        with mock.patch("pathlib.Path.is_symlink", return_value=True):
+        with mock.patch("os.lstat", side_effect=lstat_for(out, LINK_STAT)):
             with self.assertRaises(LedgerError) as ctx:
                 write_dashboard("<html>new</html>", out, force=False)
         self.assertIn("link", str(ctx.exception))

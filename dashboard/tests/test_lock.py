@@ -20,7 +20,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +40,28 @@ SPEC.loader.exec_module(dashboard)
 
 from ledgerlib import lock as lock_module  # noqa: E402
 from ledgerlib import paths as paths_module  # noqa: E402
+
+
+LINK_STAT = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+
+def lstat_for(target: Path, result: object):
+    """An `os.lstat` that answers `result` for `target` and is real elsewhere.
+
+    The guard decides on `--out` from one `lstat` (Eve's R2 of 0.15.0), so
+    faking that one call is how a test shows it a link, or an inspection
+    that fails, without creating a real link.
+    """
+    real = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return real(path, *args, **kwargs)
+
+    return fake
 from ledgerlib.errors import LedgerError  # noqa: E402
 from ledgerlib.lock import (  # noqa: E402
     LOCK_DIFFERENCES,
@@ -514,7 +538,7 @@ class LockOutputGuardTests(LockCliTestCase):
     def test_output_guard_refuses_a_reported_link(self) -> None:
         out = self.write_lock()
         before = out.read_bytes()
-        with mock.patch("pathlib.Path.is_symlink", return_value=True):
+        with mock.patch("os.lstat", side_effect=lstat_for(out, LINK_STAT)):
             code, _o, err = self.lock_to(out)
         self.assertEqual(code, 2)
         self.assertIn("link", err)

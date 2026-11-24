@@ -498,7 +498,11 @@ def looks_like_dashboard(data: bytes) -> bool:
     schema = payload.get("payload_schema")
     if not isinstance(schema, int) or isinstance(schema, bool):
         return False
-    if payload.get("mode") not in _PAYLOAD_MODES:
+    # The type first: a list or an object here is unhashable, and the set
+    # lookup would raise `TypeError` instead of refusing (Eve's second review
+    # of 0.15.0).
+    mode = payload.get("mode")
+    if not isinstance(mode, str) or mode not in _PAYLOAD_MODES:
         return False
     dictionaries = _island_json(text, _I18N_OPENER)
     return isinstance(dictionaries, dict) and isinstance(dictionaries.get("en"), dict)
