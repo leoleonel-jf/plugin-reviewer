@@ -219,6 +219,29 @@ def _append_baseline(
     return identifier, minted, code, findings, False
 
 
+def _output_refusal(out: Path, *, force: bool) -> str | None:
+    """Why the dashboard cannot be written to `out`, or `None` if it can.
+
+    The checks a caller can predict before anything is captured: the
+    overwrite guard `build` applies (`build.guard_dashboard_output`), and a
+    parent directory that exists, since `build` never creates one.
+    """
+    try:
+        build_module.guard_dashboard_output(out, force=force)
+    except LedgerError as exc:
+        return str(exc)
+    try:
+        parent_is_dir = out.parent.is_dir()
+    except OSError as exc:
+        return f"cannot inspect the directory of {str(out)!r}: {exc}"
+    if not parent_is_dir:
+        return (
+            f"cannot write {str(out)!r}: its directory does not exist, and "
+            "build never creates one"
+        )
+    return None
+
+
 def update_command(
     ledger: Path,
     what: str,
@@ -277,6 +300,13 @@ def _update_command(
     `anchors`, which never scans. The summary always carries `findings`, as
     `{"code", "message"}` pairs, so a caller reads the reason from data rather
     than from stderr prose.
+
+    `all` checks the dashboard destination before it captures (finding 8 of
+    the 2026-11-20 review): a refused `--out` writes nothing, spends no ID,
+    and reports `"refused": "output"` with exit `1`. A render that fails
+    after the append still prints the summary, with the recorded
+    `baseline_id` and `"failed_step": "render"`, and exits with the build's
+    code; `build` then renders that baseline without allocating another.
     """
     captured_on = today or datetime.date.today().isoformat()
 
@@ -302,8 +332,26 @@ def _update_command(
         "dashboard": None,
         "findings": [],
         "refused": None,
+        "failed_step": None,
     }
     code = 0
+    out_path = out if out is not None else ledger.parent / "dashboard.html"
+
+    if what == "all":
+        # The destination is checked before the capture: a refusal a caller
+        # can predict must spend no baseline ID (finding 8 of the 2026-11-20
+        # review). `build` runs the same guard again when it writes.
+        refusal = _output_refusal(out_path, force=force)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            print(
+                f"{ledger}: nothing was captured, so no baseline ID was spent",
+                file=sys.stderr,
+            )
+            summary["refused"] = "output"
+            summary["failed_step"] = "output"
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return 1
 
     if what in ("ledger", "all"):
         try:
@@ -348,7 +396,6 @@ def _update_command(
         print(f"appended {identifier} to baselines", file=sys.stderr)
 
     if what in ("anchors", "all"):
-        out_path = out if out is not None else ledger.parent / "dashboard.html"
         # `build_command` writes its own `wrote <path>` line to stdout, and
         # this command's stdout is one JSON object. Capturing it here rather
         # than adding a quiet mode to `build_command` keeps that command's
@@ -369,6 +416,18 @@ def _update_command(
         for line in buffer.getvalue().splitlines():
             print(line, file=sys.stderr)
         if build_code != 0:
+            if what == "all":
+                # The baseline is already in the ledger. Say which one, and
+                # how to render it without a second capture.
+                summary["failed_step"] = "render"
+                print(
+                    f"{ledger}: {summary['baseline_id']} is recorded but the "
+                    "dashboard was not written; run `dashboard.py build "
+                    f"{ledger}` (with the same --out) to render it without "
+                    "a new capture",
+                    file=sys.stderr,
+                )
+                print(json.dumps(summary, indent=2, ensure_ascii=False))
             return build_code
         summary["dashboard"] = str(out_path)
 

@@ -28,7 +28,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
+import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,11 +60,35 @@ from ledgerlib.build import (  # noqa: E402
     build_command,
     build_payload,
     inject_payload,
+    looks_like_dashboard,
     serialize_payload,
     write_dashboard,
 )
 from ledgerlib.constants import TOOL_VERSION  # noqa: E402
 from ledgerlib.errors import LedgerError  # noqa: E402
+from ledgerlib.outputs import guard_output  # noqa: E402
+
+
+LINK_STAT = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+
+def lstat_for(target: Path, result: object):
+    """An `os.lstat` that answers `result` for `target` and is real elsewhere.
+
+    The guard decides on `--out` from one `lstat` (Eve's R2 of 0.15.0), so
+    faking that one call is how a test shows it a link, or an inspection
+    that fails, without creating a real link.
+    """
+    real = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return real(path, *args, **kwargs)
+
+    return fake
 
 
 def extract_island(html: str) -> str:
@@ -451,6 +478,56 @@ class BuildPayloadUnreachableProjectsTests(BuildTestCase):
         self.assertEqual(
             payload["computed"]["unreachable_projects"], [str(gone)]
         )
+        self.assertEqual(payload["computed"]["unverified_projects"], [])
+
+    # Fictitious network roots, both spellings Windows accepts, plus the
+    # device form. None of them resolves anywhere; the test proves the build
+    # never asks.
+    NETWORK_ROOTS = (
+        "\\\\fileserver.invalid\\share\\project",
+        "//fileserver.invalid/share/project",
+        "\\\\?\\UNC\\fileserver.invalid\\share\\project",
+    )
+
+    def test_remote_project_root_is_not_probed_during_build(self) -> None:
+        """Finding 10 of the 2026-11-20 review: no filesystem call on a UNC root.
+
+        `Path.exists` on `\\\\server\\share` makes Windows contact the share
+        while a local page is being built. Every filesystem entry point the
+        check could reach is instrumented, and none may see a network root.
+        """
+        present = self.tmp / "present-project"
+        present.mkdir()
+        gone = self.tmp / "gone-project"
+        known_projects = [
+            self.known_project(project_root=str(present)),
+            self.known_project(project_root=str(gone)),
+            *(self.known_project(project_root=root) for root in self.NETWORK_ROOTS),
+        ]
+        ledger = self.valid_ledger(known_projects=known_projects)
+
+        seen: list[str] = []
+
+        def recording(real):
+            def call(path, *args, **kwargs):
+                seen.append(str(os.fspath(path)) if not isinstance(path, int) else "")
+                return real(path, *args, **kwargs)
+            return call
+
+        with mock.patch("os.stat", side_effect=recording(os.stat)), mock.patch(
+            "os.lstat", side_effect=recording(os.lstat)
+        ), mock.patch("os.path.exists", side_effect=recording(os.path.exists)):
+            payload, _ = self.build(ledger)
+
+        touched = [
+            path for path in seen
+            if "fileserver.invalid" in path.replace("/", "\\")
+        ]
+        self.assertEqual(touched, [], "the build asked the filesystem about a network root")
+        self.assertEqual(
+            payload["computed"]["unverified_projects"], list(self.NETWORK_ROOTS)
+        )
+        self.assertEqual(payload["computed"]["unreachable_projects"], [str(gone)])
 
 
 class BuildPayloadValidationTests(BuildTestCase):
@@ -618,7 +695,7 @@ class WriteDashboardTests(BuildTestCase):
 
     def test_overwrites_a_file_that_already_contains_the_marker(self) -> None:
         out = self.tmp / "dashboard.html"
-        out.write_text('<script id="aio-payload">{}</script>', encoding="utf-8")
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         write_dashboard("<html>new</html>", out, force=False)
         self.assertEqual(out.read_text(encoding="utf-8"), "<html>new</html>")
 
@@ -661,6 +738,268 @@ class WriteDashboardTests(BuildTestCase):
         with self.assertRaises(LedgerError):
             write_dashboard("<html>new</html>", out, force=False)
         self.assertEqual(out.read_bytes(), raw)
+
+
+class OutputGuardIdentityTests(BuildTestCase):
+    """The guard recognizes a dashboard, not a string (finding 12, 2026-11-20).
+
+    Before 0.15.0 any file holding the text `id="aio-payload"` passed as a
+    generated dashboard, so a document that only describes the format was
+    consumed by a typo'd `--out`.
+    """
+
+    DOCUMENT = (
+        "# Notes on the dashboard\n\n"
+        "The generated file's payload island is:\n\n"
+        "```html\n"
+        '<script type="application/json" id="aio-payload">{...}</script>\n'
+        "```\n"
+    ).encode("utf-8")
+
+    def test_output_guard_preserves_unrelated_document(self) -> None:
+        out = self.tmp / "notes.md"
+        out.write_bytes(self.DOCUMENT)
+        with self.assertRaises(LedgerError) as ctx:
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("--force", str(ctx.exception))
+        self.assertEqual(out.read_bytes(), self.DOCUMENT)
+
+    def test_build_refuses_an_unrelated_document_as_out(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "notes.md"
+        out.write_bytes(self.DOCUMENT)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, out, None, False)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.read_bytes(), self.DOCUMENT)
+        self.assertIn("refusing to overwrite", err.getvalue())
+
+    def test_output_guard_accepts_the_shipped_template_and_a_built_page(self) -> None:
+        out = self.tmp / "dashboard.html"
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        write_dashboard("<html>first</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), "<html>first</html>")
+
+    def test_output_guard_preserves_a_document_quoting_a_valid_island(self) -> None:
+        """A valid island in a document is a sample, not a page (Eve, 0.15.0)."""
+        out = self.tmp / "notes.md"
+        document = (
+            "# The payload island\n\n```html\n"
+            '<script type="application/json" id="aio-payload">'
+            '{"payload_schema":1,"mode":"built"}</script>\n```\n'
+        ).encode("utf-8")
+        out.write_bytes(document)
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_bytes(), document)
+
+    def test_output_guard_refuses_a_bare_island_fragment(self) -> None:
+        out = self.tmp / "dashboard.html"
+        fragment = (
+            '<script type="application/json" id="aio-payload">'
+            '{"payload_schema":1,"mode":"built"}</script>'
+        )
+        out.write_text(fragment, encoding="utf-8")
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), fragment)
+
+    # Each structural check alone: every other part of the page is right.
+    PAYLOAD_ISLAND = (
+        '<script type="application/json" id="aio-payload">'
+        '{"payload_schema":1,"mode":"built"}</script>\n'
+    )
+    I18N_ISLAND = '<script type="application/json" id="aio-i18n">{"en":{}}</script>\n'
+
+    def assert_refused(self, text: str) -> None:
+        out = self.tmp / "page.html"
+        out.write_text(text, encoding="utf-8")
+        before = out.read_bytes()
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_bytes(), before)
+
+    def test_a_page_without_the_doctype_is_refused(self) -> None:
+        self.assert_refused(
+            "<html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND + "</html>\n"
+        )
+
+    def test_a_page_that_does_not_end_the_document_is_refused(self) -> None:
+        self.assert_refused(
+            "<!DOCTYPE html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND
+            + "</html>\nmore notes after the sample\n"
+        )
+
+    def test_a_page_without_the_dictionaries_island_is_refused(self) -> None:
+        self.assert_refused(
+            "<!DOCTYPE html>\n<html>\n" + self.PAYLOAD_ISLAND + "</html>\n"
+        )
+
+    def test_a_page_with_every_part_is_recognized(self) -> None:
+        """The control for the three cases above."""
+        text = "<!DOCTYPE html>\n<html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND + "</html>\n"
+        self.assertTrue(looks_like_dashboard(text.encode("utf-8")))
+
+    def test_a_page_build_wrote_is_rebuilt_without_force(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "dashboard.html"
+        for _attempt in range(2):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                self.assertEqual(build_command(ledger_path, out, None, False), 0)
+
+    def test_a_page_the_0_14_0_shell_wrote_is_recognized(self) -> None:
+        """Compatibility with a released page, read from the tag when git has it."""
+        repo = Path(__file__).resolve().parents[2]
+        try:
+            shown = subprocess.run(
+                [
+                    "git", "-C", str(repo), "show",
+                    "v0.14.0:skills/plugin-reviewer/assets/templates/dashboard.html",
+                ],
+                capture_output=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("the v0.14.0 tag is not available in this checkout")
+        old_template = shown.stdout.decode("utf-8")
+        payload, _ = self.build(self.valid_ledger())
+        page = inject_payload(old_template, serialize_payload(payload))
+        self.assertTrue(looks_like_dashboard(old_template.encode("utf-8")))
+        self.assertTrue(looks_like_dashboard(page.encode("utf-8")))
+
+    def test_a_deeply_nested_island_is_refused_without_crashing(self) -> None:
+        page = TEMPLATE_PATH.read_text(encoding="utf-8")
+        start = page.index('id="aio-payload">') + len('id="aio-payload">')
+        end = page.index("</script", start)
+        deep = page[:start] + "[" * 100000 + "]" * 100000 + page[end:]
+        self.assertFalse(looks_like_dashboard(deep.encode("utf-8")))
+
+    def test_force_never_replaces_a_directory(self) -> None:
+        out = self.tmp / "dashboard.html"
+        out.mkdir()
+        with self.assertRaises(LedgerError) as ctx:
+            write_dashboard("<html>new</html>", out, force=True)
+        self.assertIn("not a regular file", str(ctx.exception))
+        self.assertTrue(out.is_dir())
+
+    def test_a_failure_to_inspect_out_is_a_ledger_error(self) -> None:
+        out = self.tmp / "dashboard.html"
+        with mock.patch("os.lstat", side_effect=lstat_for(out, OSError("denied"))):
+            with self.assertRaises(LedgerError) as ctx:
+                write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("denied", str(ctx.exception))
+
+    def test_the_guard_never_asks_about_a_link_target(self) -> None:
+        """The decision on a link is made from the link alone (Eve's R2 of 0.15.0).
+
+        `exists()` and `is_file()` follow a link, so asking them before the
+        link is handled can reach a remote target, or fail on one and refuse
+        a `--force` that would only have replaced the link.
+        """
+        out = self.tmp / "dashboard.html"
+        out.write_text("a target that must not be asked about", encoding="utf-8")
+        followed: list[str] = []
+        real_stat = os.stat
+
+        def recording_stat(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(out):
+                followed.append(os.fspath(path))
+            return real_stat(path, *args, **kwargs)
+
+        for force in (False, True):
+            with self.subTest(force=force), mock.patch(
+                "os.lstat", side_effect=lstat_for(out, LINK_STAT)
+            ), mock.patch("os.stat", side_effect=recording_stat):
+                if force:
+                    guard_output(out, force=True, recognizes=lambda data: False,
+                                 artifact="a test artifact")
+                else:
+                    with self.assertRaises(LedgerError):
+                        guard_output(out, force=False, recognizes=lambda data: False,
+                                     artifact="a test artifact")
+            self.assertEqual(followed, [])
+
+    def test_a_payload_mode_of_another_json_type_is_a_refusal(self) -> None:
+        """An unhashable `mode` is not recognized, never a `TypeError` (Eve's R2)."""
+        page = TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+            '"mode":"static"', '"mode":[]', 1
+        )
+        self.assertIn('"mode":[]', page)
+        self.assertFalse(looks_like_dashboard(page.encode("utf-8")))
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "dashboard.html"
+        out.write_text(page, encoding="utf-8")
+        before = out.read_bytes()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, out, None, False)
+        self.assertEqual(code, 1)
+        self.assertIn("refusing to overwrite", err.getvalue())
+        self.assertEqual(out.read_bytes(), before)
+
+    def test_a_template_that_is_not_utf8_exits_one(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        broken = self.tmp / "template.html"
+        broken.write_bytes(b"\xff\xfe not utf-8")
+        err = io.StringIO()
+        with mock.patch("ledgerlib.build.TEMPLATE_PATH", broken), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, self.tmp / "dashboard.html", None, False)
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read the dashboard template", err.getvalue())
+
+    def test_output_guard_refuses_an_island_without_a_payload(self) -> None:
+        """Valid JSON is not enough: it must be a payload document."""
+        out = self.tmp / "dashboard.html"
+        text = '<script type="application/json" id="aio-payload">{"a":1}</script>'
+        out.write_text(text, encoding="utf-8")
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), text)
+
+    def test_output_guard_refuses_a_reported_link(self) -> None:
+        """A link at `--out` is refused before anything reads through it."""
+        out = self.tmp / "dashboard.html"
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        before = out.read_bytes()
+        with mock.patch("os.lstat", side_effect=lstat_for(out, LINK_STAT)):
+            with self.assertRaises(LedgerError) as ctx:
+                write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("link", str(ctx.exception))
+        self.assertEqual(out.read_bytes(), before)
+
+    def _link_to_a_dashboard(self) -> tuple[Path, Path]:
+        target = self.tmp / "elsewhere.html"
+        target.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        link = self.tmp / "dashboard.html"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable here: {exc}")
+        return link, target
+
+    def test_output_guard_refuses_a_real_link(self) -> None:
+        link, target = self._link_to_a_dashboard()
+        before = target.read_bytes()
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", link, force=False)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_force_replaces_the_link_and_never_its_target(self) -> None:
+        link, target = self._link_to_a_dashboard()
+        before = target.read_bytes()
+        write_dashboard("<html>new</html>", link, force=True)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(link.read_text(encoding="utf-8"), "<html>new</html>")
+        self.assertEqual(target.read_bytes(), before)
 
 
 class BuildCommandTestCase(BuildTestCase):

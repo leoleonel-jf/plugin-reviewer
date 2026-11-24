@@ -19,6 +19,15 @@ git, and checked by CI. The difference is the one between a `pip freeze` filed i
 environment**. Verifying against the disk as it is *now* already has a command — `drift` — and
 giving one question two answers is worse than either. Run both when you want both.
 
+`--out` writes atomically (temp file, then rename) and refuses to replace a file that does not
+have a lockfile's shape, or that is a link (from 0.15.0; the link is judged by itself, never by
+its target). A lockfile is recognized by its whole shape, a structural check and not proof of who
+wrote it: exactly the six top-level keys the writer has always written, `lock_version` 1, and
+entries with exactly an entry's six keys, so a pin of any released version is replaced and a
+schema, a note or a JSON object that borrows `lock_version` is not. `--force` replaces an
+unrecognized file, as it does for `build`, and a link is then replaced, never written through. A
+directory at `--out` is refused with or without `--force`.
+
 Differences use a closed vocabulary: `added`, `removed`, `changed` (a different digest),
 `state_changed`. Exit codes: `0` identical, `1` any difference, `2` a tool error.
 

@@ -52,7 +52,12 @@ stdout is one JSON object; stderr carries the notes. Report:
   that the identifier was minted locally and needs reconciling with the global ledger;
 - the dashboard path when one was written;
 - every entry in `findings`, by its `code` and its message, and every other stderr note;
-- when `refused` is `strict`, that nothing was written, and why.
+- when `refused` is `strict`, that nothing was written, and why;
+- when `refused` is `output`, that the dashboard destination was refused before any capture, so
+  nothing was written and no baseline ID was spent;
+- when `failed_step` is `render`, that the `baseline_id` is recorded but the dashboard was not
+  written, and that `dashboard.py build <ledger>` with the same `--out` renders it without a new
+  capture.
 
 Exit `1` means findings, not failure: the artifact was still written, unless `--strict` was given,
 in which case `refused` says so and nothing was. Exit `2` means nothing was

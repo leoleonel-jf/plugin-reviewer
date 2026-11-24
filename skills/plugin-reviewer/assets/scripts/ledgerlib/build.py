@@ -43,6 +43,7 @@ from ledgerlib import drift, rollback
 from ledgerlib.chain import canonical_text, chain_head, verify_chain
 from ledgerlib.constants import TOOL_VERSION
 from ledgerlib.errors import LedgerError
+from ledgerlib.outputs import guard_output
 from ledgerlib.paths import _path_key, file_digest, load_json
 from ledgerlib.validate import validate_collection, validate_ledger
 
@@ -230,18 +231,34 @@ def _expired_evidence(ledger: dict, today: str) -> list[dict]:
     return expired
 
 
-def _unreachable_projects(ledger: dict) -> list[str]:
-    """Every `known_projects` entry whose recorded root no longer exists.
+def is_network_root(root: str) -> bool:
+    """Whether `root` names a network or device path, decided from the text alone.
 
-    This asks the filesystem a single question -- does the path exist -- and
-    nothing else: it never opens the project's own ledger, never reads a
-    byte of it, and never resolves it through the anchor-safety layer that
-    governs a client's configuration files, because a known project's root
-    is not an anchor any adapter declared; it is simply a path this ledger
-    recorded. A root too malformed even to stat is honestly unreachable
-    rather than a crash reaching the caller.
+    Two leading separators, in either direction: `\\\\server\\share`,
+    `//server/share`, and the device forms `\\\\?\\...` and `\\\\.\\...`. On
+    Windows asking whether such a path exists contacts the server, so a
+    local build must not ask (finding 10 of the 2026-11-20 review). The test
+    is the same on every platform, so one ledger yields one payload wherever
+    it is built; a device path to a local disk is classified the same way,
+    the cautious side of the line.
+    """
+    return len(root) >= 2 and root[0] in "\\/" and root[1] in "\\/"
+
+
+def _project_roots(ledger: dict) -> tuple[list[str], list[str]]:
+    """`(unreachable, unverified)` over the ledger's `known_projects`.
+
+    A network root (`is_network_root`) is unverified: it is classified
+    before any filesystem call and never checked. Every other root is asked
+    a single question -- does the path exist -- and nothing else: the
+    project's own ledger is never opened, and the root is not resolved
+    through the anchor-safety layer, because it is not an anchor any adapter
+    declared; it is simply a path this ledger recorded. A root too malformed
+    even to stat is honestly unreachable rather than a crash reaching the
+    caller.
     """
     unreachable: list[str] = []
+    unverified: list[str] = []
     projects = ledger.get("known_projects")
     projects = projects if isinstance(projects, list) else []
     for entry in projects:
@@ -250,13 +267,16 @@ def _unreachable_projects(ledger: dict) -> list[str]:
         root = entry.get("project_root")
         if not isinstance(root, str) or not root.strip():
             continue
+        if is_network_root(root):
+            unverified.append(root)
+            continue
         try:
             reachable = Path(root).exists()
         except (OSError, ValueError):
             reachable = False
         if not reachable:
             unreachable.append(root)
-    return unreachable
+    return unreachable, unverified
 
 
 def build_payload(
@@ -292,7 +312,8 @@ def build_payload(
     `ledger_source` exists only to label a validation finding, the way a
     path read by `drift_command` labels one. The one filesystem question
     this function asks directly -- rather than through `drift_report` or
-    `rollback_preview` -- is `unreachable_projects`' existence check.
+    `rollback_preview` -- is `_project_roots`' existence check, which a
+    network root never reaches.
     """
     if not isinstance(ledger, dict):
         raise LedgerError("ledger must be a JSON object")
@@ -339,6 +360,7 @@ def build_payload(
         except LedgerError as exc:
             previews[run_id] = {"error": str(exc)}
 
+    unreachable, unverified = _project_roots(ledger)
     payload = {
         "payload_schema": PAYLOAD_SCHEMA,
         "mode": "built",
@@ -350,7 +372,9 @@ def build_payload(
             "drift": drift_result,
             "previews": previews,
             "expired_evidence": _expired_evidence(ledger, today_value),
-            "unreachable_projects": _unreachable_projects(ledger),
+            "unreachable_projects": unreachable,
+            # Network roots, listed and never checked (`is_network_root`).
+            "unverified_projects": unverified,
             # The chain verdict plus the records that broke it. `head` rides
             # along so a reader can compare it against the digest they
             # recorded outside the ledger without leaving the page -- the page
@@ -417,15 +441,91 @@ def inject_payload(template_text: str, serialized: str) -> str:
     return template_text[:tag_end] + serialized + template_text[content_end:]
 
 
+# The two data islands every shell since 0.4.0 has carried, written exactly
+# as the template opens them. `looks_like_dashboard` requires both.
+_PAYLOAD_OPENER = '<script type="application/json" id="aio-payload">'
+_I18N_OPENER = '<script type="application/json" id="aio-i18n">'
+_PAYLOAD_MODES = frozenset({"static", "built"})
+
+
+def _island_json(text: str, opener: str) -> object:
+    """The JSON inside the one island `opener` opens, or `None`.
+
+    `None` when the opener is absent or repeated, the island is unclosed, or
+    its content is not JSON, including JSON nested too deeply to parse.
+    """
+    if text.count(opener) != 1:
+        return None
+    start = text.index(opener) + len(opener)
+    end = text.find("</script", start)
+    if end == -1:
+        return None
+    try:
+        return json.loads(text[start:end])
+    except (ValueError, RecursionError):
+        return None
+
+
+def looks_like_dashboard(data: bytes) -> bool:
+    """Whether `data` is a whole page this tool wrote: the shell, built or not.
+
+    The page must have the shell's structure, not just a sample of its
+    island (finding 12 of the 2026-11-20 review, and Eve's review of 0.15.0):
+    it opens with `<!DOCTYPE html>` and closes with `</html>`; the
+    `id="aio-payload"` marker occurs once, on the shell's own
+    `<script type="application/json">` island, whose content is a JSON
+    object with an integer `payload_schema` and a `mode` of `"static"` or
+    `"built"`; and the `aio-i18n` island holds a JSON object with an `"en"`
+    dictionary. Every template since 0.4.0 has all of it, so a page any
+    released version wrote is recognized; a note or a document that quotes
+    one island, valid or not, is not. A payload never adds a second raw
+    marker: inside JSON its quotes are escaped.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    head = text.lstrip("﻿ \t\r\n")
+    if not head[:15].lower() == "<!doctype html>":
+        return False
+    if not text.rstrip().lower().endswith("</html>"):
+        return False
+    if text.count(_ISLAND_MARKER) != 1:
+        return False
+    payload = _island_json(text, _PAYLOAD_OPENER)
+    if not isinstance(payload, dict):
+        return False
+    schema = payload.get("payload_schema")
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        return False
+    # The type first: a list or an object here is unhashable, and the set
+    # lookup would raise `TypeError` instead of refusing (Eve's second review
+    # of 0.15.0).
+    mode = payload.get("mode")
+    if not isinstance(mode, str) or mode not in _PAYLOAD_MODES:
+        return False
+    dictionaries = _island_json(text, _I18N_OPENER)
+    return isinstance(dictionaries, dict) and isinstance(dictionaries.get("en"), dict)
+
+
+def guard_dashboard_output(out: Path, *, force: bool) -> None:
+    """The dashboard's overwrite guard alone, without writing anything."""
+    guard_output(
+        out,
+        force=force,
+        recognizes=looks_like_dashboard,
+        artifact="a generated dashboard (no aio-payload island holding a payload)",
+    )
+
+
 def write_dashboard(html: str, out: Path, *, force: bool) -> None:
     """Write `html` to `out`, atomically, refusing to clobber a stray file.
 
-    The overwrite guard (design spec section 3): an existing `out` is left
-    alone unless it already looks like a generated dashboard -- it contains
-    the `aio-payload` marker -- or the caller passed `force=True`. This is
-    the first ledger-adjacent write command in the bundle, so the guard is
-    the only thing standing between a typo'd `--out` and a file that had
-    nothing to do with this tool.
+    The overwrite guard (design spec section 3, `ledgerlib.outputs`): an
+    existing `out` is left alone unless `looks_like_dashboard` accepts it,
+    or the caller passed `force=True`; a link at `out` is refused without
+    `force`. The guard is the only thing standing between a typo'd `--out`
+    and a file that had nothing to do with this tool.
 
     The write itself goes through a temporary file created in `out`'s own
     directory, then `os.replace`. `os.replace` is what this guarantees: a
@@ -439,24 +539,7 @@ def write_dashboard(html: str, out: Path, *, force: bool) -> None:
     basis before the exception propagates, so a failed build leaves no
     stray `.tmp` file behind.
     """
-    if out.exists() and not force:
-        try:
-            # Bytes, not text: an existing `out` that happens to hold
-            # non-UTF-8 content (a stray binary file at that path, say) must
-            # not crash the overwrite guard with a `UnicodeDecodeError` --
-            # it is exactly the kind of file this guard exists to protect.
-            existing = out.read_bytes()
-        except OSError as exc:
-            raise LedgerError(
-                f"cannot read existing file {str(out)!r} to check the "
-                f"overwrite guard: {exc}"
-            ) from exc
-        if _ISLAND_MARKER.encode("utf-8") not in existing:
-            raise LedgerError(
-                f"refusing to overwrite {str(out)!r}: it does not look like a "
-                "generated dashboard (no aio-payload marker); pass --force to "
-                "overwrite it anyway"
-            )
+    guard_dashboard_output(out, force=force)
 
     fd, tmp_name = tempfile.mkstemp(
         dir=str(out.parent), prefix=out.name + ".", suffix=".tmp"
@@ -612,7 +695,10 @@ def build_command(
     except LedgerError as exc:
         print(exc, file=sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A template that is not UTF-8 is as unreadable as a missing one, and
+        # must reach the caller as this exit code, not as a traceback that
+        # leaves `update all` without its summary (Eve's review of 0.15.0).
         print(
             f"cannot read the dashboard template {str(TEMPLATE_PATH)!r}: {exc}",
             file=sys.stderr,

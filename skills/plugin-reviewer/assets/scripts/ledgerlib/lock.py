@@ -35,8 +35,9 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from ledgerlib.chain import canonical_text
+from ledgerlib.chain import _write_atomically, canonical_text
 from ledgerlib.errors import LedgerError
+from ledgerlib.outputs import guard_output
 from ledgerlib.paths import load_json
 
 
@@ -44,8 +45,6 @@ LOCK_VERSION = 1
 
 # The closed vocabulary of differences, following `DRIFT_REASONS`.
 LOCK_DIFFERENCES = frozenset({"added", "removed", "changed", "state_changed"})
-
-_MARKER = '"lock_version"'
 
 
 def _baseline(ledger: Mapping, baseline_id: object) -> dict:
@@ -237,27 +236,56 @@ def lockable_kinds(adapter: Mapping) -> frozenset[str]:
     )
 
 
-def _write_lock(text: str, out: Path, *, force: bool) -> None:
-    """Write the lockfile, refusing to clobber a file that is not one.
+# The exact shape `build_lock` has written since 0.5.0, top level and entry.
+_LOCK_KEYS = frozenset(
+    {"lock_version", "generated_from", "client", "adapter_version", "platform", "entries"}
+)
+_ENTRY_KEYS = frozenset({"kind", "name", "anchor", "scope", "digest", "state"})
 
-    The guard `write_dashboard` uses, for the reason it uses it: a typo'd
-    `--out` must not consume a file that had nothing to do with this tool.
+
+def looks_like_lock(data: bytes) -> bool:
+    """Whether `data` is a lockfile this tool wrote, by its whole shape.
+
+    A JSON object with exactly the keys `build_lock` writes, `lock_version`
+    equal to `LOCK_VERSION`, a string `generated_from`, and `entries` a list
+    of objects with exactly an entry's keys. Every released writer produced
+    this shape, so a pin of any version is recognized; a schema, a note, or a
+    JSON object that only borrows `lock_version` and `entries` is not
+    (finding 12 of the 2026-11-20 review, and Eve's review of 0.15.0).
     """
-    if out.exists() and not force:
-        try:
-            existing = out.read_bytes()
-        except OSError as exc:
-            raise LedgerError(
-                f"cannot read existing file {str(out)!r} to check the "
-                f"overwrite guard: {exc}"
-            ) from exc
-        if _MARKER.encode("utf-8") not in existing:
-            raise LedgerError(
-                f"refusing to overwrite {str(out)!r}: it does not look like a "
-                "lockfile (no lock_version key); pass --force to overwrite it "
-                "anyway"
-            )
-    out.write_text(text, encoding="utf-8", newline="\n")
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+    if not isinstance(document, dict) or set(document) != _LOCK_KEYS:
+        return False
+    version = document.get("lock_version")
+    if isinstance(version, bool) or version != LOCK_VERSION:
+        return False
+    if not isinstance(document.get("generated_from"), str):
+        return False
+    entries = document.get("entries")
+    return isinstance(entries, list) and all(
+        isinstance(entry, dict) and set(entry) == _ENTRY_KEYS for entry in entries
+    )
+
+
+def _write_lock(text: str, out: Path, *, force: bool) -> None:
+    """Write the lockfile atomically, refusing to clobber a file that is not one.
+
+    The guard `write_dashboard` uses (`ledgerlib.outputs`), for the reason it
+    uses it: a typo'd `--out` must not consume a file that had nothing to do
+    with this tool. The write is the ledger's own: a temporary file in the
+    same directory, then `os.replace`, so a failure leaves the previous
+    lockfile whole and no temporary file behind.
+    """
+    guard_output(
+        out,
+        force=force,
+        recognizes=looks_like_lock,
+        artifact="a lockfile (no top-level lock_version)",
+    )
+    _write_atomically(out, text, "\n")
 
 
 def lock_command(
@@ -308,7 +336,10 @@ def lock_command(
         if out is None:
             print(text, end="")
             return 0
-        _write_lock(text, out, force=force)
+        try:
+            _write_lock(text, out, force=force)
+        except OSError as exc:
+            raise LedgerError(f"cannot write {str(out)!r}: {exc}") from exc
         print(f"wrote {out}", file=sys.stderr)
         # Printed so `lock --from ... --out ...` still yields the document on
         # stdout for a caller that pipes it, exactly as `scan` does.

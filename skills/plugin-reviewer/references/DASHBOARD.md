@@ -35,10 +35,18 @@ dashboard.py build LEDGER [--out PATH] [--lang CODE] [--force]
 | `--force` | Overrides the overwrite guard (see below). |
 | `--project`, `--adapter`, `--user-config` | Same meaning as for `scan`/`drift`: they feed the `computed.drift` and `computed.previews` sub-computations. |
 
-**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file
-itself carries the shell marker `id="aio-payload"` — the file being replaced must already be a
-dashboard. `--force` overrides the guard. This is the first ledger-adjacent command that writes;
-it writes exactly one file, atomically (temp file, then rename), and never creates a directory.
+**Overwrite guard.** `build` refuses to overwrite an existing `--out` file unless that file has
+the whole shape of a page this tool writes (a structural check, not proof of who wrote it): it
+opens with `<!DOCTYPE html>` and closes with `</html>`, its
+one `aio-payload` island holds a payload (`payload_schema`, `mode` `static` or `built`), and its
+`aio-i18n` island holds the dictionaries. Every shell since 0.4.0 has that shape. A document that
+quotes the tag, even with a valid payload, is refused (from 0.15.0; before, the marker text alone
+passed). A link at `--out` is refused too, decided from the link itself without asking about its
+target. `--force` means the same for `build`, `update` and
+`lock`: the file at `--out` is replaced even when it is not recognized, and a link is replaced by
+a regular file, never written through. A directory at `--out` is refused with or without
+`--force`. This is the first ledger-adjacent command that writes; it writes exactly one file,
+atomically (temp file, then rename), and never creates a directory.
 
 **Verification gate.** A ledger that `verify` would reject — `validate_ledger` plus the
 single-document `validate_collection` pass, same code, not similar code — fails the build with
@@ -47,6 +55,16 @@ single-document `validate_collection` pass, same code, not similar code — fail
 **Exit codes.** `0` built; `1` I/O error or overwrite refusal; `2` invalid ledger. The gate is
 the same code `dashboard.py verify` runs, so checking a ledger first with `dashboard.py verify
 LEDGER` predicts exactly whether it will build.
+
+**`update all` failures (from 0.15.0).** The `update` summary carries `failed_step`, `null` when
+every step ran. `update all` checks the dashboard destination before it captures anything: an
+`--out` the overwrite guard refuses (a directory there even with `--force`), one it cannot
+inspect, or one whose directory does not exist, writes nothing, spends no
+baseline ID, and reports `refused` and `failed_step` as `"output"` with exit `1`. When the render
+fails after the baseline was appended, the summary still reaches stdout with the recorded
+`baseline_id` and `failed_step: "render"`, and the exit code is the build's. Re-render with
+`dashboard.py build LEDGER` (same `--out`): `build` never allocates an ID, so the recovery adds
+no baseline.
 
 **No `--template` flag.** The template is read from the bundle
 (`assets/templates/dashboard.html`) only. Injection replaces the payload island's content and
@@ -96,7 +114,7 @@ partial render. An unparseable island is a fatal error for the shell, not a degr
 
 | Client situation | What you get |
 |---|---|
-| **Full** (Python + browser) | Run `build`; open the generated file. All panels populate; `computed.drift`, `computed.previews`, `computed.expired_evidence`, `computed.unreachable_projects` are present; mode is `built`. |
+| **Full** (Python + browser) | Run `build`; open the generated file. All panels populate; `computed.drift`, `computed.previews`, `computed.expired_evidence`, `computed.unreachable_projects`, `computed.unverified_projects` are present; mode is `built`. |
 | **No Python** | Follow the static-injection recipe above against `assets/templates/dashboard.html`. Open the resulting file in a browser. `mode` is `static`; the overview states plainly that digest verification, drift, and rollback preview are unavailable — nothing shown has been checked against a file on disk. |
 | **No browser** | Generate the degraded text view instead (see below): fill `assets/templates/DASHBOARD.md`'s token placeholders from the ledger and read the resulting Markdown. |
 | **Unknown client** (neither a bundled adapter nor a confirmed local one) | `scan`/`drift`/`build`'s `--adapter`/`--user-config` machinery still runs, but a `computed.drift` or `computed.previews` sub-computation that fails carries an `error` message instead of a report, and `build` still succeeds. The corresponding panel shows an "unavailable" note naming the exact command that would compute it (see `card.unavailable.*` in the template), rather than a false zero. |
@@ -210,6 +228,14 @@ an export.
   `file` is still not linkable: it is relative to a ledger whose location the page does not know.
   A project marked unreachable, or a root that is not an absolute local path, gets no Open link
   and says so, rather than a link that goes nowhere.
+- **Network roots are not checked.** A `project_root` that starts with two separators (a UNC
+  path such as `\\server\share`, `//server/share`, or a device path) is listed in
+  `computed.unverified_projects` and shown as "not checked", from 0.15.0. `build` decides this
+  from the text alone and asks the filesystem nothing about it, because on Windows that question
+  contacts the server. Local roots are still checked: an existing one is reachable and a missing
+  one is unreachable. The test is the text, so it is cautious on one side and blind on the other:
+  a device path to a local disk, or a POSIX path beginning with `//`, is left unchecked too, and a
+  mapped drive letter or a mount point that looks local is checked like any local path.
 - **Rollback is two-step.** "Prepare" reveals the §11 preview summary and a confirmation prompt;
   only after "Yes, undo this run" is clicked does the instruction's copy and queue buttons enable.
   Nothing re-arms or disarms silently — there is no timeout, and leaving the Rollback panel and

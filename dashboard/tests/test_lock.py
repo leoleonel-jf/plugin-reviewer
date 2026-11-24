@@ -20,7 +20,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +40,28 @@ SPEC.loader.exec_module(dashboard)
 
 from ledgerlib import lock as lock_module  # noqa: E402
 from ledgerlib import paths as paths_module  # noqa: E402
+
+
+LINK_STAT = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+
+def lstat_for(target: Path, result: object):
+    """An `os.lstat` that answers `result` for `target` and is real elsewhere.
+
+    The guard decides on `--out` from one `lstat` (Eve's R2 of 0.15.0), so
+    faking that one call is how a test shows it a link, or an inspection
+    that fails, without creating a real link.
+    """
+    real = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return real(path, *args, **kwargs)
+
+    return fake
 from ledgerlib.errors import LedgerError  # noqa: E402
 from ledgerlib.lock import (  # noqa: E402
     LOCK_DIFFERENCES,
@@ -381,6 +405,160 @@ class LockCliTests(LockCliTestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("lock_version", stranger.read_text(encoding="utf-8"))
+
+
+class LockOutputGuardTests(LockCliTestCase):
+    """The guard recognizes a lockfile, not a string (finding 12, 2026-11-20)."""
+
+    # A schema that describes the lockfile: it names `lock_version`, and
+    # before 0.15.0 that substring alone let `--out` consume it.
+    SCHEMA = (
+        json.dumps(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "agent.lock",
+                "type": "object",
+                "properties": {"lock_version": {"type": "integer"}},
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    def lock_to(self, out: Path, *extra: str) -> tuple[int, str, str]:
+        return self.run_cli(
+            "lock", str(self.ledger_path), "--from", "BASE-2026-000",
+            "--out", str(out), *extra,
+        )
+
+    def test_output_guard_preserves_unrelated_document(self) -> None:
+        out = self.tmp / "agent.lock.schema.json"
+        out.write_bytes(self.SCHEMA)
+        code, _o, err = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), self.SCHEMA)
+        self.assertIn("--force", err)
+
+    def borrowed(self, out: Path, document: object) -> bytes:
+        data = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+        out.write_bytes(data)
+        return data
+
+    def test_output_guard_preserves_a_json_borrowing_two_keys(self) -> None:
+        """`lock_version` and `entries` alone are not a lockfile (Eve, 0.15.0)."""
+        out = self.tmp / "example.json"
+        data = self.borrowed(out, {"lock_version": 1, "entries": []})
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_a_lock_with_a_key_the_writer_never_wrote(self) -> None:
+        """A complete lock plus one foreign key is somebody's document."""
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        data = self.borrowed(out, dict(document, note="kept by hand"))
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_a_version_this_tool_never_wrote(self) -> None:
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        data = self.borrowed(out, dict(document, lock_version=99))
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_an_entry_of_another_shape(self) -> None:
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        document["entries"] = [{"kind": "skill"}]
+        data = self.borrowed(out, document)
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_a_pin_the_0_13_0_writer_laid_out_is_replaced(self) -> None:
+        """The literal shape every released writer produced is recognized."""
+        out = self.tmp / "agent.lock"
+        entry = {
+            "anchor": "$USER_CONFIG/one",
+            "digest": "sha256:" + "a" * 64,
+            "kind": "skill",
+            "name": "one",
+            "scope": "user",
+            "state": "present",
+        }
+        self.borrowed(
+            out,
+            {
+                "adapter_version": 2,
+                "client": "claude-code",
+                "entries": [entry],
+                "generated_from": "BASE-2026-000",
+                "lock_version": 1,
+                "platform": "win32",
+            },
+        )
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 0)
+
+    def test_a_deeply_nested_file_is_refused_without_crashing(self) -> None:
+        out = self.tmp / "agent.lock"
+        data = ("[" * 100000 + "]" * 100000).encode("utf-8")
+        out.write_bytes(data)
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_force_never_replaces_a_directory(self) -> None:
+        out = self.tmp / "agent.lock"
+        out.mkdir()
+        code, _o, err = self.lock_to(out, "--force")
+        self.assertEqual(code, 2)
+        self.assertIn("not a regular file", err)
+        self.assertTrue(out.is_dir())
+
+    def test_a_lockfile_this_tool_wrote_is_replaced(self) -> None:
+        out = self.write_lock()
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 0)
+
+    def test_a_failed_replace_keeps_the_prior_lockfile_and_no_temp_file(self) -> None:
+        out = self.write_lock()
+        before = out.read_bytes()
+        names = {entry.name for entry in self.tmp.iterdir()}
+        with mock.patch("os.replace", side_effect=OSError("boom")):
+            code, _o, err = self.lock_to(out, "--force")
+        self.assertEqual(code, 2)
+        self.assertIn("boom", err)
+        self.assertEqual(out.read_bytes(), before)
+        self.assertEqual({entry.name for entry in self.tmp.iterdir()}, names)
+
+    def test_output_guard_refuses_a_reported_link(self) -> None:
+        out = self.write_lock()
+        before = out.read_bytes()
+        with mock.patch("os.lstat", side_effect=lstat_for(out, LINK_STAT)):
+            code, _o, err = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertIn("link", err)
+        self.assertEqual(out.read_bytes(), before)
+
+    def test_force_replaces_a_link_and_never_its_target(self) -> None:
+        target = self.write_lock()
+        before = target.read_bytes()
+        link = self.tmp / "linked.lock"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable here: {exc}")
+        code, _o, _e = self.lock_to(link)
+        self.assertEqual(code, 2)
+        self.assertTrue(link.is_symlink())
+        code, _o, _e = self.lock_to(link, "--force")
+        self.assertEqual(code, 0)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(target.read_bytes(), before)
 
 
 class ShippedAdapterLockableTests(unittest.TestCase):

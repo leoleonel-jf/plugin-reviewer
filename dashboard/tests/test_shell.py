@@ -333,6 +333,8 @@ TASK_6_KEYS = (
     "projects.open_ledger",
     "projects.no_path",
     "projects.unreachable_note",
+    "overview.unverified",
+    "projects.unverified_note",
 )
 
 # --- Task 6: the action model ------------------------------------------
@@ -3876,6 +3878,80 @@ class RuntimeStaticModePanelTests(RuntimePanelTests):
 
     def test_rollback_links_pathed_rows_and_the_verified_backup(self) -> None:
         self.assertEqual(self._panel("rollback")["links"], [])
+
+
+# A fictitious network root (finding 10 of the 2026-11-20 review). The build
+# classifies it without touching the filesystem and lists it in
+# `computed.unverified_projects`; the page must say so rather than present it
+# as reachable or gone.
+BS = chr(92)
+UNVERIFIED_ROOT = BS * 2 + "fileserver.invalid" + BS + "share" + BS + "project"
+UNVERIFIED_FIXTURE_PAYLOAD = json.loads(json.dumps(FIXTURE_PAYLOAD))
+UNVERIFIED_FIXTURE_PAYLOAD["ledger"]["known_projects"].append(
+    {
+        "project_root": UNVERIFIED_ROOT,
+        "ledger_path": UNVERIFIED_ROOT + BS + ".agent-audit" + BS + "ledger.json",
+        "last_seen": "2026-07-01",
+        "last_digest": DIGEST,
+        "status": "OK",
+    }
+)
+# A local-looking root the payload also lists as unverified. `fileUrl` would
+# link it, so only the unverified state keeps its Open links off the page:
+# this is what makes the "no link" assertion below depend on that state
+# rather than on `fileUrl` refusing a UNC path (Eve's review of 0.15.0).
+LISTED_LOCAL_ROOT = "C:" + BS + "srv" + BS + "listed"
+UNVERIFIED_FIXTURE_PAYLOAD["ledger"]["known_projects"].append(
+    {
+        "project_root": LISTED_LOCAL_ROOT,
+        "ledger_path": LISTED_LOCAL_ROOT + BS + "ledger.json",
+        "last_seen": "2026-07-01",
+        "last_digest": DIGEST,
+        "status": "OK",
+    }
+)
+UNVERIFIED_FIXTURE_PAYLOAD["computed"]["unverified_projects"] = [
+    UNVERIFIED_ROOT,
+    LISTED_LOCAL_ROOT,
+]
+
+
+@unittest.skipUnless(NODE, "node is not on PATH -- this suite needs it")
+class RuntimeUnverifiedProjectTests(ShellTemplateTestCase):
+    """A network root the build did not check is shown as not checked."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.proc = boot_shell(cls.text, cls.islands, UNVERIFIED_FIXTURE_PAYLOAD)
+        try:
+            cls.facts = json.loads(cls.proc.stdout)  # type: ignore[attr-defined]
+        except ValueError:
+            cls.facts = {}  # type: ignore[attr-defined]
+        cls.dicts = json.loads(cls.islands["aio-i18n"])  # type: ignore[attr-defined]
+
+    def test_the_shell_booted(self) -> None:
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)  # type: ignore[attr-defined]
+
+    def test_the_overview_names_the_unverified_root_and_its_state(self) -> None:
+        text = self.facts["overview"]["text"]  # type: ignore[attr-defined]
+        self.assertIn(UNVERIFIED_ROOT, text)
+        self.assertIn(self.dicts["en"]["overview.unverified"], text)  # type: ignore[attr-defined]
+        self.assertIn(self.dicts["en"]["projects.unverified_note"], text)  # type: ignore[attr-defined]
+
+    def test_an_unverified_root_gets_no_open_link(self) -> None:
+        text = self.facts["overview"]["text"]  # type: ignore[attr-defined]
+        self.assertIn(LISTED_LOCAL_ROOT, text)
+        for key in ("projects.open_root", "projects.open_ledger"):
+            with self.subTest(key=key):
+                self.assertNotIn(self.dicts["en"][key], text)  # type: ignore[attr-defined]
+
+    def test_an_unverified_root_is_not_counted_unreachable(self) -> None:
+        for card in self.facts["overview"]["cards"]:  # type: ignore[attr-defined]
+            if card["label"] == "Unreachable projects":
+                self.assertEqual(card["count"], "1")
+                return
+        self.fail("no Unreachable projects card")
 
 
 @unittest.skipUnless(NODE, "node is not on PATH -- this suite needs it")

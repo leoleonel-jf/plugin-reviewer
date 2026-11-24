@@ -326,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     lock_parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite --out even if it does not look like a lockfile",
+        help="overwrite --out even if it is not a lockfile this tool wrote, or is a link (the link is replaced, never its target)",
     )
     lock_parser.add_argument("--adapter", type=Path, default=None)
     lock_parser.add_argument(
@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     build_parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite --out even if it does not look like a generated dashboard",
+        help="overwrite --out even if it is not a dashboard this tool wrote, or is a link (the link is replaced, never its target)",
     )
     build_parser.add_argument(
         "--open",
@@ -456,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     update_parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite --out even if it does not look like a generated dashboard",
+        help="overwrite --out even if it is not a dashboard this tool wrote, or is a link (the link is replaced, never its target)",
     )
     update_parser.add_argument(
         "--open",
