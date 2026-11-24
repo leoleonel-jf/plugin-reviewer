@@ -19,7 +19,7 @@ This file is the review-ready source of truth for public directory submissions: 
 
 - **Submission type:** Skills only
 - **Plugin name:** Plugin Reviewer
-- **Version:** 0.15.0
+- **Version:** 0.16.0
 - **Developer identity:** Leonardo Leonel Sobral
 - **Category:** Productivity
 - **Short description:** Review before you install
