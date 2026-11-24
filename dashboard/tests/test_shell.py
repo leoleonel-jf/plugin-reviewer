@@ -3896,7 +3896,24 @@ UNVERIFIED_FIXTURE_PAYLOAD["ledger"]["known_projects"].append(
         "status": "OK",
     }
 )
-UNVERIFIED_FIXTURE_PAYLOAD["computed"]["unverified_projects"] = [UNVERIFIED_ROOT]
+# A local-looking root the payload also lists as unverified. `fileUrl` would
+# link it, so only the unverified state keeps its Open links off the page:
+# this is what makes the "no link" assertion below depend on that state
+# rather than on `fileUrl` refusing a UNC path (Eve's review of 0.15.0).
+LISTED_LOCAL_ROOT = "C:" + BS + "srv" + BS + "listed"
+UNVERIFIED_FIXTURE_PAYLOAD["ledger"]["known_projects"].append(
+    {
+        "project_root": LISTED_LOCAL_ROOT,
+        "ledger_path": LISTED_LOCAL_ROOT + BS + "ledger.json",
+        "last_seen": "2026-07-01",
+        "last_digest": DIGEST,
+        "status": "OK",
+    }
+)
+UNVERIFIED_FIXTURE_PAYLOAD["computed"]["unverified_projects"] = [
+    UNVERIFIED_ROOT,
+    LISTED_LOCAL_ROOT,
+]
 
 
 @unittest.skipUnless(NODE, "node is not on PATH -- this suite needs it")
@@ -3921,6 +3938,13 @@ class RuntimeUnverifiedProjectTests(ShellTemplateTestCase):
         self.assertIn(UNVERIFIED_ROOT, text)
         self.assertIn(self.dicts["en"]["overview.unverified"], text)  # type: ignore[attr-defined]
         self.assertIn(self.dicts["en"]["projects.unverified_note"], text)  # type: ignore[attr-defined]
+
+    def test_an_unverified_root_gets_no_open_link(self) -> None:
+        text = self.facts["overview"]["text"]  # type: ignore[attr-defined]
+        self.assertIn(LISTED_LOCAL_ROOT, text)
+        for key in ("projects.open_root", "projects.open_ledger"):
+            with self.subTest(key=key):
+                self.assertNotIn(self.dicts["en"][key], text)  # type: ignore[attr-defined]
 
     def test_an_unverified_root_is_not_counted_unreachable(self) -> None:
         for card in self.facts["overview"]["cards"]:  # type: ignore[attr-defined]

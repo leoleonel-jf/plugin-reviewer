@@ -767,6 +767,39 @@ class UpdateAllRecoveryTestCase(UpdateFixtureTestCase):
         html = (self.tmp / "dashboard.html").read_text(encoding="utf-8")
         self.assertIn("BASE-2026-000", html)
 
+    def test_update_all_refuses_a_directory_output_even_with_force(self) -> None:
+        """`--force` replaces a file, never a directory (Eve, 0.15.0)."""
+        self.give_the_probe_something_to_find()
+        ledger_path = self.write_ledger(self.bare_ledger())
+        before = ledger_path.read_bytes()
+        out = self.tmp / "dashboard.html"
+        out.mkdir()
+        for _attempt in range(2):
+            code, stdout, err = self.run_update(
+                ledger_path, "all", adapter=self.adapter_path, today="2026-08-01",
+                force=True,
+            )
+            self.assertEqual(code, 1)
+            summary = json.loads(stdout)
+            self.assertEqual(summary["refused"], "output")
+            self.assertEqual(summary["failed_step"], "output")
+            self.assertIn("not a regular file", err)
+        self.assertEqual(ledger_path.read_bytes(), before)
+        self.assertTrue(out.is_dir())
+
+    def test_update_all_reports_a_failure_to_inspect_the_output(self) -> None:
+        self.give_the_probe_something_to_find()
+        ledger_path = self.write_ledger(self.bare_ledger())
+        before = ledger_path.read_bytes()
+        with mock.patch("pathlib.Path.is_symlink", side_effect=OSError("denied")):
+            code, stdout, err = self.run_update(
+                ledger_path, "all", adapter=self.adapter_path, today="2026-08-01"
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(stdout)["refused"], "output")
+        self.assertIn("denied", err)
+        self.assertEqual(ledger_path.read_bytes(), before)
+
     def test_a_clean_all_reports_no_failed_step(self) -> None:
         self.give_the_probe_something_to_find()
         ledger_path = self.write_ledger(self.bare_ledger())

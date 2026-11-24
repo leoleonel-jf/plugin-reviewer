@@ -441,44 +441,67 @@ def inject_payload(template_text: str, serialized: str) -> str:
     return template_text[:tag_end] + serialized + template_text[content_end:]
 
 
-def looks_like_dashboard(data: bytes) -> bool:
-    """Whether `data` is a page this tool wrote: the shell, built or not.
+# The two data islands every shell since 0.4.0 has carried, written exactly
+# as the template opens them. `looks_like_dashboard` requires both.
+_PAYLOAD_OPENER = '<script type="application/json" id="aio-payload">'
+_I18N_OPENER = '<script type="application/json" id="aio-i18n">'
+_PAYLOAD_MODES = frozenset({"static", "built"})
 
-    The test is the island itself, found the way `inject_payload` finds it:
-    exactly one `id="aio-payload"` marker, on a `<script` tag, whose content
-    parses as a JSON object carrying an integer `payload_schema` and a string
-    `mode`. The shipped template passes (its island holds the static
-    payload); a document that only quotes the tag, with `{...}` or any other
-    non-payload inside, does not (finding 12 of the 2026-11-20 review). A
-    payload never adds a second raw marker: inside JSON its quotes are
-    escaped.
+
+def _island_json(text: str, opener: str) -> object:
+    """The JSON inside the one island `opener` opens, or `None`.
+
+    `None` when the opener is absent or repeated, the island is unclosed, or
+    its content is not JSON, including JSON nested too deeply to parse.
+    """
+    if text.count(opener) != 1:
+        return None
+    start = text.index(opener) + len(opener)
+    end = text.find("</script", start)
+    if end == -1:
+        return None
+    try:
+        return json.loads(text[start:end])
+    except (ValueError, RecursionError):
+        return None
+
+
+def looks_like_dashboard(data: bytes) -> bool:
+    """Whether `data` is a whole page this tool wrote: the shell, built or not.
+
+    The page must have the shell's structure, not just a sample of its
+    island (finding 12 of the 2026-11-20 review, and Eve's review of 0.15.0):
+    it opens with `<!DOCTYPE html>` and closes with `</html>`; the
+    `id="aio-payload"` marker occurs once, on the shell's own
+    `<script type="application/json">` island, whose content is a JSON
+    object with an integer `payload_schema` and a `mode` of `"static"` or
+    `"built"`; and the `aio-i18n` island holds a JSON object with an `"en"`
+    dictionary. Every template since 0.4.0 has all of it, so a page any
+    released version wrote is recognized; a note or a document that quotes
+    one island, valid or not, is not. A payload never adds a second raw
+    marker: inside JSON its quotes are escaped.
     """
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return False
+    head = text.lstrip("﻿ \t\r\n")
+    if not head[:15].lower() == "<!doctype html>":
+        return False
+    if not text.rstrip().lower().endswith("</html>"):
+        return False
     if text.count(_ISLAND_MARKER) != 1:
         return False
-    marker_at = text.index(_ISLAND_MARKER)
-    tag_start = text.rfind("<", 0, marker_at)
-    if tag_start == -1 or not text.startswith("<script", tag_start):
+    payload = _island_json(text, _PAYLOAD_OPENER)
+    if not isinstance(payload, dict):
         return False
-    tag_end = text.find(">", marker_at)
-    content_end = text.find("</script", tag_end)
-    if tag_end == -1 or content_end == -1:
+    schema = payload.get("payload_schema")
+    if not isinstance(schema, int) or isinstance(schema, bool):
         return False
-    try:
-        island = json.loads(text[tag_end + 1 : content_end])
-    except ValueError:
+    if payload.get("mode") not in _PAYLOAD_MODES:
         return False
-    if not isinstance(island, dict):
-        return False
-    schema = island.get("payload_schema")
-    return (
-        isinstance(schema, int)
-        and not isinstance(schema, bool)
-        and isinstance(island.get("mode"), str)
-    )
+    dictionaries = _island_json(text, _I18N_OPENER)
+    return isinstance(dictionaries, dict) and isinstance(dictionaries.get("en"), dict)
 
 
 def guard_dashboard_output(out: Path, *, force: bool) -> None:
@@ -668,7 +691,10 @@ def build_command(
     except LedgerError as exc:
         print(exc, file=sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A template that is not UTF-8 is as unreadable as a missing one, and
+        # must reach the caller as this exit code, not as a traceback that
+        # leaves `update all` without its summary (Eve's review of 0.15.0).
         print(
             f"cannot read the dashboard template {str(TEMPLATE_PATH)!r}: {exc}",
             file=sys.stderr,

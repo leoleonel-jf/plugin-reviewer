@@ -415,6 +415,86 @@ class LockOutputGuardTests(LockCliTestCase):
         self.assertEqual(out.read_bytes(), self.SCHEMA)
         self.assertIn("--force", err)
 
+    def borrowed(self, out: Path, document: object) -> bytes:
+        data = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+        out.write_bytes(data)
+        return data
+
+    def test_output_guard_preserves_a_json_borrowing_two_keys(self) -> None:
+        """`lock_version` and `entries` alone are not a lockfile (Eve, 0.15.0)."""
+        out = self.tmp / "example.json"
+        data = self.borrowed(out, {"lock_version": 1, "entries": []})
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_a_lock_with_a_key_the_writer_never_wrote(self) -> None:
+        """A complete lock plus one foreign key is somebody's document."""
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        data = self.borrowed(out, dict(document, note="kept by hand"))
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_a_version_this_tool_never_wrote(self) -> None:
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        data = self.borrowed(out, dict(document, lock_version=99))
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_output_guard_refuses_an_entry_of_another_shape(self) -> None:
+        out = self.write_lock()
+        document = json.loads(out.read_text(encoding="utf-8"))
+        document["entries"] = [{"kind": "skill"}]
+        data = self.borrowed(out, document)
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_a_pin_the_0_13_0_writer_laid_out_is_replaced(self) -> None:
+        """The literal shape every released writer produced is recognized."""
+        out = self.tmp / "agent.lock"
+        entry = {
+            "anchor": "$USER_CONFIG/one",
+            "digest": "sha256:" + "a" * 64,
+            "kind": "skill",
+            "name": "one",
+            "scope": "user",
+            "state": "present",
+        }
+        self.borrowed(
+            out,
+            {
+                "adapter_version": 2,
+                "client": "claude-code",
+                "entries": [entry],
+                "generated_from": "BASE-2026-000",
+                "lock_version": 1,
+                "platform": "win32",
+            },
+        )
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 0)
+
+    def test_a_deeply_nested_file_is_refused_without_crashing(self) -> None:
+        out = self.tmp / "agent.lock"
+        data = ("[" * 100000 + "]" * 100000).encode("utf-8")
+        out.write_bytes(data)
+        code, _o, _e = self.lock_to(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.read_bytes(), data)
+
+    def test_force_never_replaces_a_directory(self) -> None:
+        out = self.tmp / "agent.lock"
+        out.mkdir()
+        code, _o, err = self.lock_to(out, "--force")
+        self.assertEqual(code, 2)
+        self.assertIn("not a regular file", err)
+        self.assertTrue(out.is_dir())
+
     def test_a_lockfile_this_tool_wrote_is_replaced(self) -> None:
         out = self.write_lock()
         code, _o, _e = self.lock_to(out)
