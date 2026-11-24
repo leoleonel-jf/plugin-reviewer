@@ -230,7 +230,11 @@ def _output_refusal(out: Path, *, force: bool) -> str | None:
         build_module.guard_dashboard_output(out, force=force)
     except LedgerError as exc:
         return str(exc)
-    if not out.parent.is_dir():
+    try:
+        parent_is_dir = out.parent.is_dir()
+    except OSError as exc:
+        return f"cannot inspect the directory of {str(out)!r}: {exc}"
+    if not parent_is_dir:
         return (
             f"cannot write {str(out)!r}: its directory does not exist, and "
             "build never creates one"

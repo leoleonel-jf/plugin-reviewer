@@ -30,6 +30,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,7 @@ from ledgerlib.build import (  # noqa: E402
     build_command,
     build_payload,
     inject_payload,
+    looks_like_dashboard,
     serialize_payload,
     write_dashboard,
 )
@@ -669,11 +671,7 @@ class WriteDashboardTests(BuildTestCase):
 
     def test_overwrites_a_file_that_already_contains_the_marker(self) -> None:
         out = self.tmp / "dashboard.html"
-        out.write_text(
-            '<script type="application/json" id="aio-payload">'
-            '{"payload_schema":1,"mode":"built"}</script>',
-            encoding="utf-8",
-        )
+        out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         write_dashboard("<html>new</html>", out, force=False)
         self.assertEqual(out.read_text(encoding="utf-8"), "<html>new</html>")
 
@@ -759,6 +757,130 @@ class OutputGuardIdentityTests(BuildTestCase):
         out.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         write_dashboard("<html>first</html>", out, force=False)
         self.assertEqual(out.read_text(encoding="utf-8"), "<html>first</html>")
+
+    def test_output_guard_preserves_a_document_quoting_a_valid_island(self) -> None:
+        """A valid island in a document is a sample, not a page (Eve, 0.15.0)."""
+        out = self.tmp / "notes.md"
+        document = (
+            "# The payload island\n\n```html\n"
+            '<script type="application/json" id="aio-payload">'
+            '{"payload_schema":1,"mode":"built"}</script>\n```\n'
+        ).encode("utf-8")
+        out.write_bytes(document)
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_bytes(), document)
+
+    def test_output_guard_refuses_a_bare_island_fragment(self) -> None:
+        out = self.tmp / "dashboard.html"
+        fragment = (
+            '<script type="application/json" id="aio-payload">'
+            '{"payload_schema":1,"mode":"built"}</script>'
+        )
+        out.write_text(fragment, encoding="utf-8")
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_text(encoding="utf-8"), fragment)
+
+    # Each structural check alone: every other part of the page is right.
+    PAYLOAD_ISLAND = (
+        '<script type="application/json" id="aio-payload">'
+        '{"payload_schema":1,"mode":"built"}</script>\n'
+    )
+    I18N_ISLAND = '<script type="application/json" id="aio-i18n">{"en":{}}</script>\n'
+
+    def assert_refused(self, text: str) -> None:
+        out = self.tmp / "page.html"
+        out.write_text(text, encoding="utf-8")
+        before = out.read_bytes()
+        with self.assertRaises(LedgerError):
+            write_dashboard("<html>new</html>", out, force=False)
+        self.assertEqual(out.read_bytes(), before)
+
+    def test_a_page_without_the_doctype_is_refused(self) -> None:
+        self.assert_refused(
+            "<html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND + "</html>\n"
+        )
+
+    def test_a_page_that_does_not_end_the_document_is_refused(self) -> None:
+        self.assert_refused(
+            "<!DOCTYPE html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND
+            + "</html>\nmore notes after the sample\n"
+        )
+
+    def test_a_page_without_the_dictionaries_island_is_refused(self) -> None:
+        self.assert_refused(
+            "<!DOCTYPE html>\n<html>\n" + self.PAYLOAD_ISLAND + "</html>\n"
+        )
+
+    def test_a_page_with_every_part_is_recognized(self) -> None:
+        """The control for the three cases above."""
+        text = "<!DOCTYPE html>\n<html>\n" + self.PAYLOAD_ISLAND + self.I18N_ISLAND + "</html>\n"
+        self.assertTrue(looks_like_dashboard(text.encode("utf-8")))
+
+    def test_a_page_build_wrote_is_rebuilt_without_force(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        out = self.tmp / "dashboard.html"
+        for _attempt in range(2):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                self.assertEqual(build_command(ledger_path, out, None, False), 0)
+
+    def test_a_page_the_0_14_0_shell_wrote_is_recognized(self) -> None:
+        """Compatibility with a released page, read from the tag when git has it."""
+        repo = Path(__file__).resolve().parents[2]
+        try:
+            shown = subprocess.run(
+                [
+                    "git", "-C", str(repo), "show",
+                    "v0.14.0:skills/plugin-reviewer/assets/templates/dashboard.html",
+                ],
+                capture_output=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("the v0.14.0 tag is not available in this checkout")
+        old_template = shown.stdout.decode("utf-8")
+        payload, _ = self.build(self.valid_ledger())
+        page = inject_payload(old_template, serialize_payload(payload))
+        self.assertTrue(looks_like_dashboard(old_template.encode("utf-8")))
+        self.assertTrue(looks_like_dashboard(page.encode("utf-8")))
+
+    def test_a_deeply_nested_island_is_refused_without_crashing(self) -> None:
+        page = TEMPLATE_PATH.read_text(encoding="utf-8")
+        start = page.index('id="aio-payload">') + len('id="aio-payload">')
+        end = page.index("</script", start)
+        deep = page[:start] + "[" * 100000 + "]" * 100000 + page[end:]
+        self.assertFalse(looks_like_dashboard(deep.encode("utf-8")))
+
+    def test_force_never_replaces_a_directory(self) -> None:
+        out = self.tmp / "dashboard.html"
+        out.mkdir()
+        with self.assertRaises(LedgerError) as ctx:
+            write_dashboard("<html>new</html>", out, force=True)
+        self.assertIn("not a regular file", str(ctx.exception))
+        self.assertTrue(out.is_dir())
+
+    def test_a_failure_to_inspect_out_is_a_ledger_error(self) -> None:
+        out = self.tmp / "dashboard.html"
+        with mock.patch("pathlib.Path.is_symlink", side_effect=OSError("denied")):
+            with self.assertRaises(LedgerError) as ctx:
+                write_dashboard("<html>new</html>", out, force=False)
+        self.assertIn("denied", str(ctx.exception))
+
+    def test_a_template_that_is_not_utf8_exits_one(self) -> None:
+        ledger_path = self.tmp / "ledger.json"
+        ledger_path.write_text(json.dumps(self.valid_ledger()), encoding="utf-8")
+        broken = self.tmp / "template.html"
+        broken.write_bytes(b"\xff\xfe not utf-8")
+        err = io.StringIO()
+        with mock.patch("ledgerlib.build.TEMPLATE_PATH", broken), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = build_command(ledger_path, self.tmp / "dashboard.html", None, False)
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read the dashboard template", err.getvalue())
 
     def test_output_guard_refuses_an_island_without_a_payload(self) -> None:
         """Valid JSON is not enough: it must be a payload document."""

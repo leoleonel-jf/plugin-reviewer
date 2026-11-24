@@ -236,25 +236,37 @@ def lockable_kinds(adapter: Mapping) -> frozenset[str]:
     )
 
 
-def looks_like_lock(data: bytes) -> bool:
-    """Whether `data` is a lockfile: a JSON object with a top-level integer
-    `lock_version` and an `entries` list.
+# The exact shape `build_lock` has written since 0.5.0, top level and entry.
+_LOCK_KEYS = frozenset(
+    {"lock_version", "generated_from", "client", "adapter_version", "platform", "entries"}
+)
+_ENTRY_KEYS = frozenset({"kind", "name", "anchor", "scope", "digest", "state"})
 
-    Not a substring search: a schema or a note that names `lock_version`
-    passed the guard before 0.15.0 and was overwritten (finding 12 of the
-    2026-11-20 review).
+
+def looks_like_lock(data: bytes) -> bool:
+    """Whether `data` is a lockfile this tool wrote, by its whole shape.
+
+    A JSON object with exactly the keys `build_lock` writes, `lock_version`
+    equal to `LOCK_VERSION`, a string `generated_from`, and `entries` a list
+    of objects with exactly an entry's keys. Every released writer produced
+    this shape, so a pin of any version is recognized; a schema, a note, or a
+    JSON object that only borrows `lock_version` and `entries` is not
+    (finding 12 of the 2026-11-20 review, and Eve's review of 0.15.0).
     """
     try:
         document = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return False
-    if not isinstance(document, dict):
+    if not isinstance(document, dict) or set(document) != _LOCK_KEYS:
         return False
     version = document.get("lock_version")
-    return (
-        isinstance(version, int)
-        and not isinstance(version, bool)
-        and isinstance(document.get("entries"), list)
+    if isinstance(version, bool) or version != LOCK_VERSION:
+        return False
+    if not isinstance(document.get("generated_from"), str):
+        return False
+    entries = document.get("entries")
+    return isinstance(entries, list) and all(
+        isinstance(entry, dict) and set(entry) == _ENTRY_KEYS for entry in entries
     )
 
 

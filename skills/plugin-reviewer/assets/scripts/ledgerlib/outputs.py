@@ -8,10 +8,12 @@ document that merely described the format carried that string, so a typo'd
 the caller's own recognizer whether the bytes *are* the artifact, and refuses
 a link at `--out` before anything reads through it.
 
-`--force` means the same thing for both commands: skip this guard and replace
-whatever is at `--out`. A link there is replaced by a regular file; its target
-is never written, because the write is always a temporary file in the same
-directory followed by `os.replace`, which acts on the link itself.
+`--force` means the same thing for both commands: replace the file at `--out`
+even when the guard does not recognize it. A link there is replaced by a
+regular file; its target is never written, because the write is always a
+temporary file in the same directory followed by `os.replace`, which acts on
+the link itself. A directory, or anything else that is not a regular file, is
+refused with or without `--force`.
 """
 
 from __future__ import annotations
@@ -34,23 +36,35 @@ def guard_output(
     A missing `out` passes. A link is refused whatever it points at: the page
     or lockfile behind it may belong to someone else, and the write would
     replace the link, not follow it, which is not what a caller naming that
-    path expects. An existing regular file passes only when `recognizes`
-    accepts its bytes. `force` skips every check.
+    path expects. Anything else that is not a regular file -- a directory,
+    above all -- is refused even with `force`, because no write can replace
+    it and `update all` must learn that before it captures (Eve's review of
+    0.15.0). An existing regular file passes only when `recognizes` accepts
+    its bytes. `force` skips the link refusal and the recognizer, nothing
+    else. A failure to inspect `out` is a `LedgerError` naming it.
     """
-    if force:
-        return
-    if out.is_symlink():
+    try:
+        is_link = out.is_symlink()
+        exists = out.exists()
+        is_file = out.is_file()
+    except OSError as exc:
+        raise LedgerError(f"cannot inspect {str(out)!r}: {exc}") from exc
+    if is_link:
+        if force:
+            return
         raise LedgerError(
             f"refusing to write {str(out)!r}: it is a link; pass --force to "
             "replace the link itself with a regular file (its target is never "
             "written)"
         )
-    if not out.exists():
+    if not exists:
         return
-    if not out.is_file():
+    if not is_file:
         raise LedgerError(
             f"refusing to overwrite {str(out)!r}: it is not a regular file"
         )
+    if force:
+        return
     try:
         # Bytes, not text: a stray binary file at `out` is exactly what this
         # guard protects, and decoding it must not crash the guard.

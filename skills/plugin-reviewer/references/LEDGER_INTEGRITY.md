@@ -20,10 +20,12 @@ environment**. Verifying against the disk as it is *now* already has a command â
 giving one question two answers is worse than either. Run both when you want both.
 
 `--out` writes atomically (temp file, then rename) and refuses to replace a file that is not a
-lockfile this tool wrote (a JSON object with a top-level `lock_version` and an `entries` list) or
-that is a link; a schema or note that only names `lock_version` is refused (from 0.15.0).
-`--force` skips that guard, as it does for `build`: a link is then replaced, never written
-through.
+lockfile this tool wrote, or that is a link (from 0.15.0). A lockfile is recognized by its whole
+shape: exactly the six top-level keys the writer has always written, `lock_version` 1, and
+entries with exactly an entry's six keys, so a pin of any released version is replaced and a
+schema, a note or a JSON object that borrows `lock_version` is not. `--force` replaces an
+unrecognized file, as it does for `build`, and a link is then replaced, never written through. A
+directory at `--out` is refused with or without `--force`.
 
 Differences use a closed vocabulary: `added`, `removed`, `changed` (a different digest),
 `state_changed`. Exit codes: `0` identical, `1` any difference, `2` a tool error.
