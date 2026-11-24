@@ -1,5 +1,5 @@
 {
-  "adapter_version": 2,
+  "adapter_version": 3,
   "client": "codex",
   "expires_on": "2027-02-17",
   "anchors": {
@@ -12,6 +12,9 @@
     ],
     "$PROJECT": [
       "."
+    ],
+    "$REPO_ROOT": [
+      "$ancestor:.git"
     ],
     "$SYSTEM_CONFIG": [
       "$platform:linux:/etc/codex",
@@ -122,6 +125,7 @@
       "kind": "skill",
       "scope": "project",
       "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+      "up_to": "$REPO_ROOT",
       "lockable": true
     },
     {

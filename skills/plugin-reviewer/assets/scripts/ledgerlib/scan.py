@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import fnmatch
+import glob
 import hashlib
 import json
 import math
@@ -372,6 +373,9 @@ def run_probe(
     if not is_glob:
         return _probe_one(probe, spec, roots, patterns, own_root=root)
 
+    if "up_to" in probe:
+        return _walk_up(probe, reference, root, roots, patterns, excluded)
+
     tail = reference.group(2) or ""
     try:
         matches = [root] if not tail else list(root.glob(tail))
@@ -434,6 +438,58 @@ def run_probe(
     for item in items:
         item["attributes"]["glob"] = spec
     items.sort(key=lambda item: item["anchor"])
+    return items
+
+
+def _walk_up(
+    probe: dict,
+    reference: object,
+    root: Path,
+    roots: dict[str, Path],
+    patterns: Sequence[str],
+    excluded: frozenset[str],
+) -> list[dict]:
+    """A glob asked in its own anchor's root and in every directory above it.
+
+    `up_to` (0.16.0) names where the walk stops: the probe's pattern is asked
+    in `root`, then in each parent of `root` up to and including the root of
+    the `up_to` anchor, and never above it. Codex reads `.agents/skills` that
+    way, from the working directory up to the repository root, so a scan from
+    a monorepo module that asked the module alone recorded part of what the
+    client loads as if it were all of it (finding 13 of the 2026-11-20
+    review).
+
+    Each level is an ordinary probe of its own, anchored at the `up_to`
+    anchor: every match is re-checked against that anchor like any other, a
+    level that matches nothing is one `no_match` item naming its own pattern,
+    and every item keeps the pattern that found it, so `drift` re-asks each
+    level separately. A directory name goes into its level's pattern escaped,
+    so a `[` in it is a character and not a wildcard. Two skills of one name
+    at two levels are two items with two anchors.
+
+    When the `up_to` anchor did not resolve, is the same directory, or does
+    not contain `root`, no parent of `root` lies inside it and only `root` is
+    asked: from outside any repository Codex reads the working directory
+    alone, as codex-cli 0.146.0 did when this was written.
+    """
+    own = {key: value for key, value in probe.items() if key != "up_to"}
+    items = run_probe(own, roots, patterns, excluded)
+    target = probe["up_to"]
+    name = target[1:] if isinstance(target, str) and target.startswith("$") else ""
+    top = roots.get(name)
+    if top is None:
+        return items
+    tail = reference.group(2) or ""
+    for directory in root.parents:
+        if not _within(directory, top):
+            break
+        relative = directory.relative_to(top).as_posix()
+        level = f"${name}"
+        if relative != ".":
+            level += "/" + glob.escape(relative)
+        if tail:
+            level += "/" + tail
+        items.extend(run_probe(dict(own, glob=level), roots, patterns, excluded))
     return items
 
 

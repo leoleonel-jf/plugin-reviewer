@@ -23,7 +23,7 @@
     },
     "anchors": {
       "type": "object",
-      "description": "Anchor name to an ordered list of candidate roots. A candidate is `$env:NAME` -- the value of that environment variable, skipped when unset or empty -- or `$platform:<system>:<path>`, applying only where `sys.platform` starts with `<system>` and skipped textually before any filesystem call otherwise -- or a filesystem path with a leading `~` expanded; a relative candidate resolves against the project. The first candidate that resolves to an existing directory wins. If none does the anchor is unresolved and every probe under it is recorded not_present -- EXCEPT when every candidate was skipped by a platform guard, in which case the anchor is not applicable on this platform and its probes are skipped entirely, producing no items and a note: nothing was looked at, so no absence was verified.",
+      "description": "Anchor name to an ordered list of candidate roots. A candidate is `$env:NAME` -- the value of that environment variable, skipped when unset or empty -- or `$platform:<system>:<path>`, applying only where `sys.platform` starts with `<system>` and skipped textually before any filesystem call otherwise -- or `$ancestor:<name>`, the nearest of the project and its parents that holds an entry called `<name>`, tested without following links (0.16.0; `<name>` is one plain file name) -- or a filesystem path with a leading `~` expanded; a relative candidate resolves against the project. The first candidate that resolves to an existing directory wins. If none does the anchor is unresolved and every probe under it is recorded not_present -- EXCEPT when every candidate was skipped by a platform guard, in which case the anchor is not applicable on this platform and its probes are skipped entirely, producing no items and a note: nothing was looked at, so no absence was verified.",
       "propertyNames": { "pattern": "^\\$[A-Z_]+$" },
       "additionalProperties": {
         "type": "array",
@@ -71,6 +71,7 @@
         { "required": ["path"], "not": { "required": ["glob"] } }
       ],
       "dependencies": {
+        "up_to": { "required": ["glob"] },
         "parse": { "required": ["path"] },
         "pointer": { "required": ["parse"] }
       },
@@ -110,6 +111,11 @@
           "type": "string",
           "pattern": "^/",
           "description": "RFC 6901 JSON pointer selecting a sub-document; one item per key at that location."
+        },
+        "up_to": {
+          "type": "string",
+          "pattern": "^\\$[A-Z_]+$",
+          "description": "Only with `glob` (0.16.0). Names a declared anchor other than the probe's own: the pattern is asked in the probe's anchor root and again in every parent directory up to and including that anchor's root, never above it, each level recorded under its own pattern. When that anchor is unresolved, is the same directory, or does not contain the probe's root, only the probe's own root is asked. `codex.json` uses it to read `.agents/skills` from the project up to the repository root."
         },
         "lockable": {
           "type": "boolean",

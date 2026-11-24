@@ -132,6 +132,10 @@ rather than part of that design:
   probe at all: `check_glob` refuses an absolute pattern, so a system path can only reach an
   adapter as an anchor root. `$MANAGED_CONFIG` and `$LEGACY_MANAGED_CONFIG` in `claude-code.json`
   exist for the same reason.
+- `$REPO_ROOT`, declared by `codex.json` as `$ancestor:.git` (from 0.16.0), is the root of the
+  repository the project sits in; probes with `up_to` stop there (Probes, below). A candidate
+  `$ancestor:<name>` is the nearest of the project and its parents that holds an entry `<name>`,
+  one plain file name, tested without following links.
 - `$HOME`, declared as `~` by `codex.json`, exists because the research places
   `<home>/.agents/skills/` against the home directory itself rather than under the relocatable
   user configuration root.
@@ -157,6 +161,7 @@ a finding:
 | `parse` | optional `json` or `toml`, and only alongside `path` |
 | `pointer` | optional RFC 6901 JSON pointer, and only alongside `parse` |
 | `lockable` | optional boolean, false by omission: whether this probe's items are pinned into `agent.lock` |
+| `up_to` | optional, only alongside `glob`: a declared anchor other than the probe's own, `$NAME`; the pattern is also asked in every parent directory up to that anchor's root (from 0.16.0) |
 <!-- PROBE_FIELDS_END -->
 
 `glob` and `path` both pass `check_glob` at **load** time, under the rules in Adapter glob safety
@@ -164,6 +169,22 @@ a finding:
 runs. That check is about the pattern; every path a probe actually produces is re-checked against its
 anchor before it is opened, because a symlinked directory can carry a match out of the tree between
 the adapter being validated and the walk running.
+
+**A glob with `up_to` walks up, and stops at a fixed anchor** (from 0.16.0). The pattern is asked
+in its own anchor's root, then once in each parent directory up to and including the root of the
+`up_to` anchor, and never above it. Each parent is its own level: a match is re-checked against the
+`up_to` anchor and stored under it (`$REPO_ROOT/packages/.agents/skills/x/SKILL.md`), a level that
+matches nothing is one `not_present` item naming that level's pattern, and two skills of one name
+at two levels are two items with two anchors. When the `up_to` anchor did not resolve, is the same
+directory, or does not contain the probe's root, only the probe's own root is asked. `codex.json`
+declares `$REPO_ROOT` as `$ancestor:.git`, the nearest of the project and its parents holding an
+entry named `.git` (a directory, or the file a worktree has), tested without following links, and
+puts `up_to: "$REPO_ROOT"` on its project skills probe. That is how Codex reads `.agents/skills`:
+codex-cli 0.146.0, asked with `skills/list` from an isolated app-server on 2026-11-23, listed the
+skills of a module, of the directory between, and of the repository root, both copies of a homonym,
+nothing above the root, and from outside any repository only the working directory's. Codex lets
+`project_root_markers` in `config.toml` replace `.git`; `codex.json` assumes the default and does not
+read that key.
 
 Every item a `glob` probe produces, its matches and its `not_present` item alike, carries the
 pattern in `attributes.glob` (from 0.14.0). That is what lets `drift` expand the pattern again and

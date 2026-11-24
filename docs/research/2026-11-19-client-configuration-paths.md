@@ -17,6 +17,7 @@ below names the page and the kind of evidence. Nothing here was carried over fro
 | **S** | Vendor documentation, but the fetch returned a model-written summary of that part of the page, not its raw text. Weaker than V |
 | **C** | The client's own source on its `main` branch, read on 2026-11-19, no commit pinned. Says what the code does, not what the vendor promises |
 | **D** | Confirmed on a live Windows installation, by file and key names only |
+| **O** | Observed in the client's own answer, with the version named in the row: added after the re-verification, by the release that relied on it |
 
 Claude Code pages are under `https://code.claude.com/docs/en/` and were fetched as markdown (the
 page name plus `.md`). None shows a "last updated" date. Codex pages are under
@@ -150,6 +151,7 @@ read in full). `claude plugin list --json` is mentioned (V `plugins/loading`).
 | `hooks.json` in `<codex-home>`, `<repo>/.codex/`, `/etc/codex/`, `%ProgramData%\OpenAI\Codex\` | V `hooks`, locations table |
 | `rules/*.rules` under `<codex-home>` and `<repo>/.codex/` | V `agent-configuration/rules`: "scans `rules/` under every active config layer" |
 | `agents/*.toml` under `<codex-home>` and `<repo>/.codex/` | V `agent-configuration/subagents` |
+| `.agents/skills` in the working directory and in every directory above it up to the repository root (0.16.0: `$REPO_ROOT` as `$ancestor:.git`, `up_to` on the project skills probe) | V `build-skills`; O codex-cli 0.146.0, `skills/list` from an isolated app-server on 2026-11-23, no model invoked: from a module it listed the module's, the intermediate directory's and the root's skills, both copies of a homonym with their own paths, nothing above the root; a `.git` file marked the root as a `.git` directory does; with no `.git` it listed the working directory's only. `project_root_markers` in `config.toml` can replace `.git` and is not read |
 | `[mcp_servers.<name>]` in the user and project `config.toml` | V `extend/mcp` |
 | `[plugins."<name>@<marketplace>"]` in the user and project `config.toml` | V `plugins/build/plugins.md` |
 | `/etc/codex/requirements.toml`, `%ProgramData%\OpenAI\Codex\requirements.toml` | S `enterprise/managed-configuration`; C `loader/mod.rs` |
