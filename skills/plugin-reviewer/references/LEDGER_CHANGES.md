@@ -117,8 +117,10 @@ naming the pattern and the reason, never the path it reached, even when another 
 that path. A pattern recorded as its own absence is held to the same boundary: a match inside the
 anchor is `appeared` under the pattern's name, and one that resolves outside it is
 `UNVERIFIABLE` with the reason, its path not reported (0.16.0). When both kinds of match are
-there, the row is the arrival, `appeared`, and the refusal is not reported until a new capture
-records each match. A new path is new once, by kind,
+there, the item's row is the arrival, `appeared`, and a second row naming the pattern carries the
+refusal, `UNVERIFIABLE` with its reason and no path (0.17.0). A directory the walk cannot list
+leaves an absence `UNVERIFIABLE`, `walk_incomplete`, and a pattern that already matched still
+reports what it could list and names the pattern among the report's findings. A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the

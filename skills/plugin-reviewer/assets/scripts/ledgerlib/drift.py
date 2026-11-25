@@ -91,6 +91,9 @@ DRIFT_REASONS = frozenset(
         "not_regular_file",
         "appeared",
         "glob_failed",
+        # A bounded walk that could not list a directory under its root:
+        # an absence there is not verified (0.17.0).
+        "walk_incomplete",
         # The pointer-recheck vocabulary. An absence recorded *inside* a file
         # (`pointer_unresolved`, `no_match`) cannot be re-verified from the
         # file's existence, so it is re-resolved -- or, when the baseline
@@ -364,37 +367,61 @@ def _classify_absent_pattern(
     content, and a `..` segment or an absolute form must be refused exactly
     as it would be at scan time, not walked.
     """
+    failure, arrived, refused = _absent_pattern_split(anchor, resolved, options)
+    if failure is not None:
+        return UNVERIFIABLE, failure
+    if arrived:
+        return DRIFTED, "appeared"
+    if refused is not None:
+        return UNVERIFIABLE, refused
+    return IN_PLACE, None
+
+
+def _absent_pattern_split(
+    anchor: str,
+    resolved: Mapping[str, Path],
+    options: tuple[int | None, bool] | None,
+) -> tuple[str | None, bool, str | None]:
+    """`(failure, arrived, refused)` for a recorded absence asked again.
+
+    `failure` is the reason the pattern could not be asked at all; otherwise
+    `arrived` says a match lies inside the anchor the pattern names and
+    `refused` is the reason of the first match that does not.
+    """
     try:
         check_glob(anchor)
     except PathSafetyError as exc:
-        return UNVERIFIABLE, exc.reason
+        return exc.reason, False, None
     reference = ANCHOR_REFERENCE.match(anchor.replace("\\", "/"))
     if reference is None:
-        return UNVERIFIABLE, "path_malformed_anchor_reference"
+        return "path_malformed_anchor_reference", False, None
     root = resolved.get(reference.group(1))
     if root is None:
-        return UNVERIFIABLE, "path_unknown_anchor"
+        return "path_unknown_anchor", False, None
     tail = reference.group(2) or ""
     if options is None:
         # The walk limits the item records are malformed: asking without
         # them would count skills the client never loads as arrivals.
-        return UNVERIFIABLE, "glob_failed"
+        return "glob_failed", False, None
     if not tail:
-        return (DRIFTED, "appeared") if root.is_dir() else (IN_PLACE, None)
+        return None, root.is_dir(), None
+    unlisted: list[OSError] = []
     try:
-        matches = expand_glob(root, tail, *options)
+        matches = expand_glob(root, tail, *options, unlisted)
     except (OSError, ValueError, RecursionError, NotImplementedError):
         # The same refusal set `run_probe` catches around `Path.glob`, for
         # the same reason: a pattern the filesystem will not expand is a
         # finding, not a crash, and bare `RuntimeError` stays uncaught
         # because CPython reserves it for genuine defects.
-        return UNVERIFIABLE, "glob_failed"
+        return "glob_failed", False, None
     # Each match is held to the boundary `scan` holds it to, as
     # `_glob_additions` holds the matches of a pattern that already matched:
     # a match that resolves outside the anchor the pattern names is not an
     # arrival, and its path is not reported (Eve's second review of 0.16.0).
+    arrived = False
     refused: str | None = None
-    for match in matches:
+    # Sorted, so which match is met first does not depend on the filesystem.
+    for match in sorted(matches):
         try:
             stored, _portable = anchor_path(match, resolved)
             path = resolve_anchored(stored, resolved)
@@ -406,10 +433,31 @@ def _classify_absent_pattern(
         except PathSafetyError as exc:
             refused = refused or exc.reason
             continue
-        return DRIFTED, "appeared"
-    if refused is not None:
-        return UNVERIFIABLE, refused
-    return IN_PLACE, None
+        arrived = True
+    if unlisted and not arrived:
+        # A directory under the root could not be listed: nothing found is
+        # not an absence verified.
+        return "walk_incomplete", False, refused
+    return None, arrived, refused
+
+
+def _refusal_beside_arrival(item: object, resolved: Mapping[str, Path]) -> str | None:
+    """The refusal a recorded absence met beside an arrival, or None.
+
+    The item's own row is the arrival, `appeared`; a match of the same
+    pattern that resolves outside its anchor is reported too, as a row of its
+    own naming the pattern and the reason, never the path it reached (Eve's
+    reviews of 0.16.0: one row hid the other).
+    """
+    if not isinstance(item, dict) or item.get("state") != "not_present":
+        return None
+    anchor = item.get("anchor")
+    if not isinstance(anchor, str) or not any(char in _GLOB_CHARS for char in anchor):
+        return None
+    failure, arrived, refused = _absent_pattern_split(
+        anchor, resolved, walk_options(item.get("attributes"))
+    )
+    return refused if failure is None and arrived else None
 
 
 def _glob_additions(
@@ -502,11 +550,17 @@ def _glob_additions(
         if group["options"] is None:
             problems.append((pattern, "glob_failed"))
             continue
+        unlisted: list[OSError] = []
         try:
-            matches = expand_glob(root, tail, *group["options"]) if tail else [root]
+            matches = (
+                expand_glob(root, tail, *group["options"], unlisted) if tail else [root]
+            )
         except (OSError, ValueError, RecursionError, NotImplementedError):
             problems.append((pattern, "glob_failed"))
             continue
+        if unlisted:
+            # What is listed is still asked; what is not cannot be.
+            problems.append((pattern, "walk_incomplete"))
         found: set[str] = set()
         refused: str | None = None
         for match in matches:
@@ -870,6 +924,21 @@ def drift_report(
                     "reason": reason,
                 }
             )
+            beside = (
+                _refusal_beside_arrival(item, roots)
+                if (state, reason) == (DRIFTED, "appeared")
+                else None
+            )
+            if beside is not None:
+                classified(UNVERIFIABLE)
+                rows.append(
+                    {
+                        **rows[-1],
+                        "path": None,
+                        "state": UNVERIFIABLE,
+                        "reason": beside,
+                    }
+                )
         # A glob that already matched is asked again, so a path it yields now
         # and did not then is reported (finding 5 of the 2026-11-20 review).
         additions, problems, recorded = _glob_additions(items, roots)

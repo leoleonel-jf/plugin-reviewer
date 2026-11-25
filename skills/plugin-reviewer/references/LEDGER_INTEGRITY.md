@@ -43,13 +43,16 @@ Only kinds an adapter marks `lockable` are pinned — the ones naming an install
 permission rules and environment variable names are deliberately left out: a lockfile that fails
 CI because somebody edited `CLAUDE.md` is one somebody switches off in the first week.
 
-For a glob probe the test is also the probe's: an item whose recorded `glob`, kind and scope are
-exactly those of a probe without `lockable` stays out, even when another probe of its kind is
-lockable. The skills Codex caches under `$USER_CONFIG/skills/.system` are probed that way and never
-pinned; a system skill found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0). The
-match is on the recorded text, so the kind alone still decides for an item found by a literal
-`path` probe, for a level an `up_to` walk re-anchored to its own pattern, for a baseline that
-records no `glob`, and for an item whose `scope` or `glob` is not text.
+The test is also the probe's: an item whose recorded probe, kind and scope are exactly those of a
+probe without `lockable` stays out, even when another probe of its kind is lockable. The recorded
+probe is `attributes.probe`, the `glob` or `path` the adapter declares, which `scan` writes on every
+item from 0.17.0, literal paths and `up_to` levels included; a 0.16.0 baseline has only
+`attributes.glob`, which names the probe of an ordinary glob and of nothing else. The skills Codex
+caches under `$USER_CONFIG/skills/.system` are probed that way and never pinned; a system skill
+found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0). A target that a lockable
+probe of the same kind and scope also declares stays pinnable. The kind alone decides for an item
+that records neither field, and for one whose probe, pattern or `scope` is present and not text: a
+`scope` that is not text is never read as absent, so it cannot match a probe declared without one.
 
 A lockfile carries no timestamp and no absolute path, so two machines with the same configuration
 produce identical bytes. A mismatched `client` or `platform` is refused outright rather than

@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.17.0 - 2026-11-24
+
+The follow-ups Eve's reviews of 0.16.0 set aside for after that release: what the lock pins, what a
+re-asked pattern reports, what a walk that cannot list a directory says, and one more eval case on
+where a review may read.
+
+- **The lock applies each probe's `lockable` by the probe an item records.** `scan` now writes on
+  every item `attributes.probe`, the `glob` or `path` the adapter declares (for an `up_to` level,
+  the declared pattern, not the level's), and `lock` matches it: a literal `path` probe and a
+  walked level without `lockable` stay out of `agent.lock` as the `.system` cache does. A 0.16.0
+  baseline falls back to `attributes.glob`. A `scope` that is present and not text is no longer
+  read as absent, so it cannot match a probe declared without one.
+- **A re-asked absence reports an arrival and a refusal together.** When a pattern recorded as its
+  own absence now meets a match inside its anchor and one that resolves outside, `drift` reports
+  both: the arrival on the item's row, the refusal on a second row naming the pattern, with no path.
+- **A directory the walk cannot list is said.** A bounded walk (`max_depth`, `skip_hidden`) that
+  meets a directory it cannot list marks the probe's items `attributes.walk_incomplete` and reports
+  the new finding `walk_incomplete`; `drift` names the pattern among its findings, and an absence
+  behind such a directory is `UNVERIFIABLE`, `walk_incomplete`. A root that does not exist is still
+  an ordinary absence. Tests now tell a link at the walk's prefix (entered, matches held to the
+  anchor) from a link below it (a symbolic link not followed, a junction walked and held), each
+  kind where the platform can make it.
+- **Eval case `SEC-006`** (45 cases): a candidate that calls a file outside its bundle a resource
+  of the reviewer. The claim is the candidate's text; the reviewer's resources are those of the
+  Skill the client loaded, and `stays_inside_candidate_bundle` and `RUN_PROTOCOL.md` say so.
+
+No identifier, label or required field changed; a ledger written by 0.16.0 verifies and builds
+under 0.17.0. Each guard is proved by ablation.
+
 ## 0.16.0 - 2026-11-23
 
 The last two medium findings of the independent review of 2026-11-20, both about how much the

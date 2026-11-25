@@ -110,6 +110,39 @@ def _by_key(entries: list[Mapping], *, side: str) -> dict[tuple, Mapping]:
     return indexed
 
 
+def _found_by_unpinned_probe(
+    kind: object,
+    attributes: Mapping,
+    unpinned: frozenset[tuple[str, str | None, str]],
+) -> bool:
+    """Whether the item's recorded probe is one `unpinned_patterns` names.
+
+    The probe is `attributes.probe`, the target the adapter declares, which
+    `scan` records from 0.17.0 on every item, literal paths and `up_to`
+    levels included; a baseline from 0.16.0 has only `attributes.glob`, the
+    pattern that matched, which names the probe for an ordinary glob and for
+    nothing else. A baseline with neither leaves the kind to decide.
+
+    `validate_ledger` asks only that `attributes` be an object, so any of
+    these values can be a list or an object in an imported or hand-edited
+    baseline; looked up unhashable, one raised `TypeError` out of `lock` and
+    `lock --check` (Eve's third review of 0.16.0). Only text is a recorded
+    probe or scope. A `scope` that is present and not text is not read as
+    absent, which could match a probe declared without one (Eve's fourth
+    review): the item stays pinnable by its kind.
+    """
+    target = attributes.get("probe")
+    if not isinstance(target, str):
+        target = attributes.get("glob")
+    if not isinstance(target, str):
+        return False
+    scope = attributes.get("scope")
+    if scope is not None and not isinstance(scope, str):
+        return False
+    scope = scope if isinstance(scope, str) and scope.strip() else None
+    return (kind, scope, target) in unpinned
+
+
 def _entries(
     baseline: Mapping,
     lockable: frozenset[str],
@@ -124,16 +157,9 @@ def _entries(
         if kind not in lockable:
             continue
         attributes = item.get("attributes")
-        scope = attributes.get("scope") if isinstance(attributes, Mapping) else None
-        pattern = attributes.get("glob") if isinstance(attributes, Mapping) else None
-        # `validate_ledger` asks only that `attributes` be an object, so either
-        # value can be a list or an object in an imported or hand-edited
-        # baseline, and an unhashable one made the lookup below raise
-        # `TypeError` out of `lock` and `lock --check` (Eve's third review of
-        # 0.16.0). Only text is a recorded pattern; anything else leaves the
-        # item pinnable by its kind, as before 0.16.0.
-        match_scope = scope if isinstance(scope, str) and scope.strip() else None
-        if isinstance(pattern, str) and (kind, match_scope, pattern) in unpinned:
+        attributes = attributes if isinstance(attributes, Mapping) else {}
+        scope = attributes.get("scope")
+        if _found_by_unpinned_probe(kind, attributes, unpinned):
             # Found by a probe that is not lockable, though its kind is: the
             # skills Codex caches under `.system` change with every client
             # update and are no configuration of the user's (Eve's second
@@ -268,28 +294,29 @@ def lockable_kinds(adapter: Mapping) -> frozenset[str]:
 
 
 def unpinned_patterns(adapter: Mapping) -> frozenset[tuple[str, str | None, str]]:
-    """`(kind, scope, glob)` of the probes that are not lockable though their kind is.
+    """`(kind, scope, target)` of the probes that are not lockable though their kind is.
 
     `lockable_kinds` reduces the adapter to a set of kinds, and one lockable
     `skill` probe made every skill item pinnable, whichever probe found it:
     the skills Codex caches in `$USER_CONFIG/skills/.system`, recorded by a
     probe of their own without `lockable`, went into `agent.lock` and turned
     every client update into a lock difference (Eve's second review of
-    0.16.0). Every glob item records the pattern that found it, so the
-    probe's eligibility can be applied to the item. A pattern that a lockable
-    probe of the same kind and scope also declares stays pinnable, so no
-    system skill declared lockable is dropped, and nothing is filtered by
-    scope alone.
+    0.16.0). The target is the probe's `glob` or `path` as declared, the one
+    every item records in `attributes.probe`, so the probe's eligibility can
+    be applied to the item. A target that a lockable probe of the same kind
+    and scope also declares stays pinnable, so no system skill declared
+    lockable is dropped, and nothing is filtered by scope alone.
     """
     probes = adapter.get("probes") if isinstance(adapter, Mapping) else None
     probes = [p for p in (probes if isinstance(probes, list) else []) if isinstance(p, Mapping)]
     kinds = lockable_kinds(adapter)
 
     def triple(probe: Mapping) -> tuple[str, str | None, str] | None:
-        kind, scope, pattern = probe.get("kind"), probe.get("scope"), probe.get("glob")
-        if kind not in kinds or not isinstance(pattern, str):
+        kind, scope = probe.get("kind"), probe.get("scope")
+        target = probe.get("glob", probe.get("path"))
+        if kind not in kinds or not isinstance(target, str):
             return None
-        return (kind, scope if isinstance(scope, str) and scope.strip() else None, pattern)
+        return (kind, scope if isinstance(scope, str) and scope.strip() else None, target)
 
     pinned = {triple(p) for p in probes if p.get("lockable") is True}
     return frozenset(

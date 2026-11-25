@@ -232,6 +232,86 @@ class UnpinnedPatternMetadataTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class ProbeProvenanceTests(unittest.TestCase):
+    """Eve's reviews of 0.16.0, follow-up: the probe an item records decides.
+
+    From 0.17.0 `scan` records the probe's declared target in
+    `attributes.probe`, so a literal `path` probe and an `up_to` level are
+    matched to their probe as an ordinary glob is; a 0.16.0 baseline falls
+    back to `attributes.glob`.
+    """
+
+    ADAPTER = {
+        "probes": [
+            {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md",
+             "lockable": True},
+            {"kind": "hook", "scope": "user", "path": "$USER_CONFIG/hooks.json"},
+            {"kind": "hook", "scope": "user", "path": "$USER_CONFIG/team-hooks.json",
+             "lockable": True},
+            {"kind": "skill", "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+             "up_to": "$REPO_ROOT"},
+        ]
+    }
+
+    def entries(self, items: list[dict]) -> list[str]:
+        from ledgerlib.lock import lockable_kinds, unpinned_patterns
+
+        built = build_lock(
+            ledger(items=items), baseline_id="BASE-2026-000",
+            lockable=lockable_kinds(self.ADAPTER), unpinned=unpinned_patterns(self.ADAPTER),
+        )
+        return sorted(entry["name"] for entry in built["entries"])
+
+    def test_a_literal_path_probe_that_is_not_lockable_is_not_pinned(self) -> None:
+        self.assertEqual(
+            self.entries([
+                item("hook", "personal", attributes={"scope": "user",
+                                                     "probe": "$USER_CONFIG/hooks.json"}),
+                item("hook", "team", attributes={"scope": "user",
+                                                 "probe": "$USER_CONFIG/team-hooks.json"}),
+            ]),
+            ["team"],
+        )
+
+    def test_an_up_to_level_is_matched_to_its_declared_probe(self) -> None:
+        self.assertEqual(
+            self.entries([
+                item("skill", "level", attributes={
+                    "glob": "$REPO_ROOT/mod/.agents/skills/*/SKILL.md",
+                    "probe": "$PROJECT/.agents/skills/*/SKILL.md",
+                }),
+                item("skill", "mine", attributes={
+                    "scope": "user", "glob": "$USER_CONFIG/skills/*/SKILL.md",
+                    "probe": "$USER_CONFIG/skills/*/SKILL.md",
+                }),
+            ]),
+            ["mine"],
+        )
+
+    def test_a_scope_that_is_not_text_is_not_read_as_absent(self) -> None:
+        """A probe declared without a scope is `(kind, None, target)`; an item
+        whose scope is a list must not match it by being read as absent."""
+        self.assertEqual(
+            self.entries([
+                item("skill", "odd", attributes={
+                    "scope": ["project"], "probe": "$PROJECT/.agents/skills/*/SKILL.md",
+                }),
+            ]),
+            ["odd"],
+        )
+
+    def test_the_recorded_probe_wins_over_the_glob(self) -> None:
+        self.assertEqual(
+            self.entries([
+                item("skill", "level", attributes={
+                    "glob": "$USER_CONFIG/skills/*/SKILL.md",
+                    "probe": "$PROJECT/.agents/skills/*/SKILL.md",
+                }),
+            ]),
+            [],
+        )
+
+
 class DeterminismTests(unittest.TestCase):
     def render(self, document: dict) -> str:
         return lock_module.render_lock(

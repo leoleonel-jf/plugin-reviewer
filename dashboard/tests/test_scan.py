@@ -3626,6 +3626,26 @@ class CodexSkillTreeTests(CodexNestedProjectSkillTests):
             ],
         )
 
+    def test_every_item_records_the_probe_the_adapter_declares(self) -> None:
+        """0.17.0: `attributes.probe` is the declared target, before `up_to`
+        re-anchors a level to its own pattern."""
+        repo = self.tmp / "repo"
+        module = repo / "mod"
+        module.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.at(repo, "root-skill")
+        items = self.scan_from(module)["items"]
+        adapter = json.loads((ADAPTERS_DIR / "codex.json").read_text(encoding="utf-8"))
+        declared = {probe.get("glob", probe.get("path")) for probe in adapter["probes"]}
+        for entry in items:
+            with self.subTest(anchor=entry["anchor"]):
+                self.assertIn(entry["attributes"].get("probe"), declared)
+        level = [entry for entry in items
+                 if entry["anchor"] == "$REPO_ROOT/.agents/skills/root-skill/SKILL.md"]
+        self.assertEqual(len(level), 1, items)
+        self.assertEqual(level[0]["attributes"]["glob"], "$REPO_ROOT/.agents/skills/**/SKILL.md")
+        self.assertEqual(level[0]["attributes"]["probe"], "$PROJECT/.agents/skills/**/SKILL.md")
+
     def test_unpinned_patterns_name_the_cache_probe_alone(self) -> None:
         from ledgerlib.lock import unpinned_patterns
 
@@ -3644,6 +3664,82 @@ class CodexSkillTreeTests(CodexNestedProjectSkillTests):
             }
         )
         self.assertEqual(unpinned_patterns(adapter), frozenset())
+
+    def link_as(self, how: str, link: Path, target: Path) -> None:
+        """A directory link of one kind, or the test skipped where it cannot be made."""
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if how == "symlink":
+            try:
+                os.symlink(target, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("cannot create a directory symlink here")
+            return
+        if os.name != "nt":
+            self.skipTest("junctions exist on Windows only")
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True)
+        if done.returncode != 0:
+            self.skipTest("cannot create a junction here")
+
+    def prefix_linked(self, how: str, target: Path) -> dict:
+        """A repository whose `.agents/skills` itself is a link to `target`."""
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        skill = target / "group" / "x" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("x", encoding="utf-8")
+        self.link_as(how, repo / ".agents" / "skills", target)
+        return self.scan_from(repo)
+
+    def check_prefix_outside(self, how: str) -> None:
+        entry = self.prefix_linked(how, self.tmp / "outside-root")
+        self.assertEqual(self.present_skills(entry), [])
+        refused = [item for item in entry["items"] if item["kind"] == "skill"
+                   and item["attributes"].get("reason") in PATH_SAFETY_REASONS]
+        self.assertEqual(len(refused), 1, entry["items"])
+
+    def check_prefix_inside(self, how: str) -> None:
+        entry = self.prefix_linked(how, self.tmp / "repo" / "real-skills")
+        self.assertEqual(self.present_skills(entry),
+                         ["$PROJECT/real-skills/group/x/SKILL.md"])
+
+    def test_a_symlinked_prefix_outside_the_anchor_is_walked_and_refused(self) -> None:
+        """The prefix is where the walk starts, so a link there is entered;
+        each match is then held to the anchor like any other."""
+        self.check_prefix_outside("symlink")
+
+    def test_a_junctioned_prefix_outside_the_anchor_is_walked_and_refused(self) -> None:
+        self.check_prefix_outside("junction")
+
+    def test_a_symlinked_prefix_inside_the_anchor_is_read(self) -> None:
+        self.check_prefix_inside("symlink")
+
+    def test_a_junctioned_prefix_inside_the_anchor_is_read(self) -> None:
+        self.check_prefix_inside("junction")
+
+    def test_a_child_symlink_is_not_followed(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        inside = repo / "elsewhere"
+        (inside / "SKILL.md").parent.mkdir(parents=True)
+        (inside / "SKILL.md").write_text("x", encoding="utf-8")
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        self.link_as("symlink", repo / ".agents" / "skills" / "linked", inside)
+        self.assertEqual(self.present_skills(self.scan_from(repo)), [])
+
+    def test_a_child_junction_is_walked_and_held_to_the_anchor(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        inside = repo / "elsewhere"
+        (inside / "SKILL.md").parent.mkdir(parents=True)
+        (inside / "SKILL.md").write_text("x", encoding="utf-8")
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        self.link_as("junction", repo / ".agents" / "skills" / "linked", inside)
+        self.assertEqual(self.present_skills(self.scan_from(repo)),
+                         ["$PROJECT/elsewhere/SKILL.md"])
 
     def test_a_link_to_a_directory_is_not_followed(self) -> None:
         repo = self.tmp / "repo"
@@ -3678,6 +3774,57 @@ class CodexSkillTreeTests(CodexNestedProjectSkillTests):
                 and item["attributes"].get("reason") in PATH_SAFETY_REASONS
             ]
             self.assertEqual(len(refused), 1, entry["items"])
+
+
+def deny_listing(*names: str):
+    """`os.scandir` refusing every directory whose last component is in `names`."""
+    real = os.scandir
+
+    def scandir(path=".", *args, **kwargs):
+        if Path(os.fspath(path)).name in names:
+            raise PermissionError(13, "listing denied by the test", os.fspath(path))
+        return real(path, *args, **kwargs)
+
+    return mock.patch.object(os, "scandir", scandir)
+
+
+class IncompleteWalkTests(unittest.TestCase):
+    """Follow-up of Eve's reviews of 0.16.0: a directory the walk cannot list is said."""
+
+    PROBE = {"kind": "skill", "glob": "$USER_CONFIG/skills/**/SKILL.md",
+             "max_depth": 6, "skip_hidden": True}
+
+    def tree(self, root: Path) -> None:
+        for relative in ("a", "locked/b"):
+            path = root / "skills" / relative / "SKILL.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+
+    def test_an_unlisted_directory_marks_the_probe_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.tree(root)
+            with deny_listing("locked"):
+                items = run_probe(self.PROBE, {"USER_CONFIG": root}, [])
+            present = [item for item in items if item["state"] == "present"]
+            self.assertEqual([item["anchor"] for item in present],
+                             ["$USER_CONFIG/skills/a/SKILL.md"])
+            self.assertTrue(all(item["attributes"].get("walk_incomplete") is True
+                                for item in items), items)
+            findings = scan_module._parse_findings(items)
+            self.assertEqual([finding["code"] for finding in findings], ["walk_incomplete"])
+            self.assertIn("walk_incomplete", FINDING_CODES)
+
+    def test_a_listed_tree_and_a_missing_root_are_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.assertFalse(any(item["attributes"].get("walk_incomplete")
+                                 for item in run_probe(self.PROBE, {"USER_CONFIG": root}, [])))
+            self.tree(root)
+            items = run_probe(self.PROBE, {"USER_CONFIG": root}, [])
+            self.assertEqual(len([i for i in items if i["state"] == "present"]), 2)
+            self.assertFalse(any(item["attributes"].get("walk_incomplete") for item in items))
+            self.assertEqual(scan_module._parse_findings(items), [])
 
 
 class MalformedWalkLimitTests(unittest.TestCase):

@@ -1802,6 +1802,28 @@ class RecordedRefusalDriftTests(GlobBoundaryTests):
         self.assertEqual((row["state"], row["reason"]), ("DRIFTED", "appeared"))
         self.assertEqual(code, 1)
 
+    def test_an_arrival_and_a_refusal_are_both_reported(self) -> None:
+        """Follow-up of Eve's reviews of 0.16.0: one row hid the other."""
+        (self.user_config / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        # Sorts before `evil`: the arrival is met first, and the walk must
+        # still reach the refusal.
+        self.skill("aaa-new")
+        secret_dir = self.home / "secret-5e1c"
+        self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        code, report, _ = self.drift(ledger)
+        self.assertNotIn("secret-5e1c", json.dumps(report))
+        rows = [row for row in self.rows(report) if row["anchor"] == self.PATTERN]
+        self.assertEqual(
+            sorted((row["state"], row["reason"] in PATH_SAFETY_REASONS) for row in rows),
+            [("DRIFTED", False), ("UNVERIFIABLE", True)],
+            rows,
+        )
+        self.assertTrue(all(row["path"] is None for row in rows), rows)
+        self.assertEqual(report["summary"]["UNVERIFIABLE"], 1)
+        self.assertEqual(code, 1)
+
     # The inherited scenarios are about a pattern that already matched.
     test_a_new_match_linked_into_another_anchor_is_refused = None
     test_a_new_match_linked_outside_every_anchor_is_refused = None
@@ -2013,6 +2035,38 @@ class BoundedWalkDriftTests(GlobFixture):
         self.assertIn("glob_failed", json.dumps(report) + stderr)
         self.assertNotIn("$PROJECT/.agents/skills/group/beta/SKILL.md", rows)
         self.assertIn(code, (0, 1))
+
+    def deny(self, *names: str):
+        real = os.scandir
+
+        def scandir(path=".", *args, **kwargs):
+            if Path(os.fspath(path)).name in names:
+                raise PermissionError(13, "listing denied by the test", os.fspath(path))
+            return real(path, *args, **kwargs)
+
+        return mock.patch.object(os, "scandir", scandir)
+
+    def test_a_walk_that_cannot_list_a_directory_says_so(self) -> None:
+        """Follow-up of Eve's reviews of 0.16.0: re-asking a pattern that met an
+        unlisted directory reports it, and still reports what it could list."""
+        self.at("group/alpha")
+        (self.project / ".agents" / "skills" / "locked").mkdir()
+        ledger = self.capture()
+        self.at("group/beta")
+        with self.deny("locked"):
+            code, report, stderr = self.drift(ledger)
+        rows = {row["anchor"]: row for row in self.rows(report)}
+        self.assertEqual(rows["$PROJECT/.agents/skills/group/beta/SKILL.md"]["reason"], "appeared")
+        self.assertIn("walk_incomplete", json.dumps(report) + stderr)
+        self.assertEqual(code, 1)
+
+    def test_an_absence_behind_an_unlisted_directory_is_not_verified(self) -> None:
+        (self.project / ".agents" / "skills" / "locked").mkdir(parents=True)
+        ledger = self.capture()
+        with self.deny("locked"):
+            _code, report, _stderr = self.drift(ledger)
+        row = next(row for row in self.rows(report) if row["anchor"] == self.PATTERN)
+        self.assertEqual((row["state"], row["reason"]), ("UNVERIFIABLE", "walk_incomplete"))
 
     def test_a_null_recorded_limit_is_unverifiable_not_dropped(self) -> None:
         """Eve's third review of 0.16.0: `max_depth: null` read as absent, and the
