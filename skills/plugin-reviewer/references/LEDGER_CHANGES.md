@@ -116,9 +116,18 @@ holds it: one that resolves outside it, into another anchor or none, is one `UNV
 naming the pattern and the reason, never the path it reached, even when another probe recorded
 that path. A pattern recorded as its own absence is held to the same boundary: a match inside the
 anchor is `appeared` under the pattern's name, and one that resolves outside it is
-`UNVERIFIABLE` with the reason, its path not reported (0.16.0). When both kinds of match are
-there, the row is the arrival, `appeared`, and the refusal is not reported until a new capture
-records each match. A new path is new once, by kind,
+`UNVERIFIABLE` with the reason, its path not reported (0.16.0). One walk answers every
+row of such an absence (0.17.0): the item's own row is the arrival, `appeared`, when a match lies
+inside the anchor, and each other fact the same walk met is a further row naming the pattern,
+`UNVERIFIABLE` with no path, in this order: a match refused at the anchor, then a directory the walk
+could not list (`walk_incomplete`). Without an arrival the first of those facts is the item's own
+row. A pattern that already matched and meets a directory it cannot list still reports what it
+could list and names the pattern among the report's findings. A capture that could not list part of
+the tree recorded `attributes.walk_incomplete` on its items, and `drift` reads it back: such an
+absence is `UNVERIFIABLE`, `capture_incomplete`, whatever matches now, and a path that pattern
+yields now and the capture does not hold is `UNVERIFIABLE`, `capture_incomplete`, not `appeared`,
+since it may have been there unseen. The items that capture did record keep their own comparison;
+a new, complete capture is what turns the rest into a verdict. A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the

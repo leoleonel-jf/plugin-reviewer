@@ -99,6 +99,9 @@ FINDING_UNREDACTED_PARSE = "unredacted_parse"
 # interpreter that has `tomllib` (Python 3.11+).
 FINDING_PARSE_FAILED = "parse_failed"
 FINDING_PARSE_UNAVAILABLE = "parse_unavailable"
+# A bounded walk that could not list a directory under its root: the probe
+# recorded part of what its pattern matches, and said nothing (0.17.0).
+FINDING_WALK_INCOMPLETE = "walk_incomplete"
 FINDING_CODES = frozenset(
     {
         FINDING_GENERIC_FALLBACK,
@@ -107,6 +110,7 @@ FINDING_CODES = frozenset(
         FINDING_UNREDACTED_PARSE,
         FINDING_PARSE_FAILED,
         FINDING_PARSE_UNAVAILABLE,
+        FINDING_WALK_INCOMPLETE,
     }
 )
 
@@ -382,8 +386,9 @@ def run_probe(
     if options is None:
         return [_item(probe, name=spec, anchor=spec, state="not_present",
                       reason="malformed_probe")]
+    unlisted: list[OSError] = []
     try:
-        matches = [root] if not tail else expand_glob(root, tail, *options)
+        matches = [root] if not tail else expand_glob(root, tail, *options, unlisted)
     except (
         OSError,
         ValueError,
@@ -448,6 +453,10 @@ def run_probe(
             item["attributes"]["max_depth"] = max_depth
         if skip_hidden:
             item["attributes"]["skip_hidden"] = True
+        if unlisted:
+            # A directory under the root could not be listed: what this
+            # pattern found is part of what is there, not all of it.
+            item["attributes"]["walk_incomplete"] = True
     items.sort(key=lambda item: item["anchor"])
     return items
 
@@ -483,7 +492,11 @@ def _unescape(segment: str) -> str:
 
 
 def expand_glob(
-    root: Path, tail: str, max_depth: int | None = None, skip_hidden: bool = False
+    root: Path,
+    tail: str,
+    max_depth: int | None = None,
+    skip_hidden: bool = False,
+    errors: list[OSError] | None = None,
 ) -> list[Path]:
     """What a probe's pattern matches under `root`, with the walk limits applied.
 
@@ -529,7 +542,22 @@ def expand_glob(
     name = _unescape(parts[star + 1])
     base = root.joinpath(*prefix)
     found: list[Path] = []
-    for directory, dirnames, filenames in os.walk(base, followlinks=False):
+
+    def unlisted(error: OSError) -> None:
+        # A root that does not exist is an ordinary absence, not a gap. Any
+        # other directory `os.walk` could not list is: without `onerror` it
+        # was skipped in silence and the inventory looked whole (Eve's
+        # reviews of 0.16.0).
+        if errors is None:
+            return
+        missing = isinstance(error, (FileNotFoundError, NotADirectoryError))
+        if missing and Path(error.filename or "") == base:
+            return
+        errors.append(error)
+
+    for directory, dirnames, filenames in os.walk(
+        base, followlinks=False, onerror=unlisted
+    ):
         here = Path(directory)
         depth = len(here.relative_to(base).parts)
         if name in filenames or name in dirnames:
@@ -1157,7 +1185,17 @@ def scan_detail(
     patterns = document["sensitive_key_patterns"]
     items: list[dict] = []
     for probe in document["probes"]:
-        items.extend(run_probe(probe, roots, patterns, excluded))
+        found = run_probe(probe, roots, patterns, excluded)
+        # Which probe found the item, as the adapter declares it: its `glob`
+        # or its `path`, before `up_to` re-anchors a level to a pattern of
+        # its own. `lock` applies the probe's `lockable` by it, for literal
+        # paths and walked levels alike (Eve's reviews of 0.16.0). Adapter
+        # data, not file content.
+        declared, _is_glob = _probe_target(probe)
+        if declared is not None:
+            for item in found:
+                item["attributes"]["probe"] = declared
+        items.extend(found)
     findings.extend(_parse_findings(items))
 
     entry = {
@@ -1224,6 +1262,7 @@ def _parse_findings(items: Sequence[dict]) -> list[dict[str, str]]:
     an absent optional setting, recorded and verified, and is no finding.
     """
     findings: list[dict[str, str]] = []
+    walked: set[object] = set()
     for item in items:
         attributes = item.get("attributes")
         if not isinstance(attributes, dict):
@@ -1251,6 +1290,15 @@ def _parse_findings(items: Sequence[dict]) -> list[dict[str, str]]:
                 f"this interpreter has no {unavailable} parser (tomllib needs "
                 f"Python 3.11 or later): the {kind} probe recorded {anchor} by "
                 f"digest only, so no {kind} from it is in this baseline",
+            )
+        pattern = attributes.get("glob")
+        if attributes.get("walk_incomplete") is True and pattern not in walked:
+            walked.add(pattern)
+            _add_finding(
+                findings,
+                FINDING_WALK_INCOMPLETE,
+                f"the {kind} probe could not list every directory under {pattern}: "
+                "this baseline holds part of what the pattern matches, not all of it",
             )
     return findings
 

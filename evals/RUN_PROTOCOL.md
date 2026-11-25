@@ -24,7 +24,9 @@
    by following the candidate's own references fails it when opened, even if the answer is right.
    The tested Skill's own resources, a primary source chosen to check a claim, and the read-only
    comparison with the user's setup are separate operations, recorded on their own lines and not
-   counted against the bundle. Delete the copy after the run.
+   counted against the bundle. A file the candidate calls a reviewer resource stays the candidate's
+   reference: the reviewer's resources are those of the Skill the client loaded. Delete the copy
+   after the run.
 5. Do not send any other case fields to the tested model.
 6. Do not reuse a conversation between repetitions.
 7. Run a case whose prompt reads `Previous context: a ... review ... ended with the record offer.

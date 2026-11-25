@@ -197,15 +197,24 @@ under `node_modules/` listed), as its loader's source says (`MAX_SCAN_DEPTH` 6,
 `max_depth: 6` and `skip_hidden: true`, and the skills Codex caches under `$USER_CONFIG/skills/.system`
 with a probe of their own, scope `system`, not lockable since every Codex update rewrites them. Each
 item records the limits beside its pattern, and `drift` walks with the same ones. Not matched: Codex
-follows a link to a directory inside a user or repository root. This walk does not follow a
-symbolic link, so a skill reached only through one is not found; a Windows junction is walked, and a
-match through it is held to the probe's anchor like any other, so one that lands outside is recorded
-as a refusal, never read. Codex's own limits on the number of directories and entries per root are
-not applied.
+follows a link to a directory inside a user or repository root. A link at the prefix itself (the
+skills root is a link) is where the walk starts, so it is entered, as Codex enters it; a link below
+the prefix is a child. This walk does not follow a child symbolic link, so a skill reached only
+through one is not found; a child Windows junction is walked. Either way every match is held to the
+probe's anchor like any other, so one that lands outside is recorded as a refusal, never read.
+Codex's own limits on the number of directories and entries per root are not applied. A directory
+the walk cannot list (permission, I/O) marks every item of that probe `attributes.walk_incomplete:
+true` and is a finding of the run, `walk_incomplete` (from 0.17.0): before, it was skipped in
+silence and the inventory looked whole. A root that does not exist is an ordinary absence, not a
+gap. `drift` reads the mark back: what that capture could not list is not compared as if it had
+been (see [LEDGER_CHANGES.md](LEDGER_CHANGES.md)).
 
 Every item a `glob` probe produces, its matches and its `not_present` item alike, carries the
 pattern in `attributes.glob` (from 0.14.0). That is what lets `drift` expand the pattern again and
-report a path that was not there at capture ([LEDGER_CHANGES.md](LEDGER_CHANGES.md)).
+report a path that was not there at capture ([LEDGER_CHANGES.md](LEDGER_CHANGES.md)). Every item,
+of a glob or a `path` probe, also records in `attributes.probe` the probe's target as the adapter
+declares it (from 0.17.0): for an `up_to` level that is the declared pattern, not the level's own.
+`lock` applies the probe's `lockable` by it ([LEDGER_INTEGRITY.md](LEDGER_INTEGRITY.md)).
 
 `parse` reads the file, and `pointer` selects a sub-document within it: the location a pointer names
 becomes one item per key, which is what turns one `settings.json` into one `mcp-server` item per
