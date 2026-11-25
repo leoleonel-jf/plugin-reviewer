@@ -203,9 +203,11 @@ the prefix is a child. This walk does not follow a child symbolic link, so a ski
 through one is not found; a child Windows junction is walked. Either way every match is held to the
 probe's anchor like any other, so one that lands outside is recorded as a refusal, never read.
 Codex's own limits on the number of directories and entries per root are not applied. A directory
-the walk cannot list (permission, I/O) marks every item of that probe ttributes.walk_incomplete:
-true and is a finding of the run, walk_incomplete (from 0.17.0): before, it was skipped in silence
-and the inventory looked whole. A root that does not exist is an ordinary absence, not a gap.
+the walk cannot list (permission, I/O) marks every item of that probe `attributes.walk_incomplete:
+true` and is a finding of the run, `walk_incomplete` (from 0.17.0): before, it was skipped in
+silence and the inventory looked whole. A root that does not exist is an ordinary absence, not a
+gap. `drift` reads the mark back: what that capture could not list is not compared as if it had
+been (see [LEDGER_CHANGES.md](LEDGER_CHANGES.md)).
 
 Every item a `glob` probe produces, its matches and its `not_present` item alike, carries the
 pattern in `attributes.glob` (from 0.14.0). That is what lets `drift` expand the pattern again and

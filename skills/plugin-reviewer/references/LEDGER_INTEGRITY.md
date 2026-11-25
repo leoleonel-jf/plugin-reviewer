@@ -51,8 +51,10 @@ item from 0.17.0, literal paths and `up_to` levels included; a 0.16.0 baseline h
 caches under `$USER_CONFIG/skills/.system` are probed that way and never pinned; a system skill
 found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0). A target that a lockable
 probe of the same kind and scope also declares stays pinnable. The kind alone decides for an item
-that records neither field, and for one whose probe, pattern or `scope` is present and not text: a
-`scope` that is not text is never read as absent, so it cannot match a probe declared without one.
+that records neither field, and for one whose recorded field is present and not text: a `probe`
+that is there and not text does not fall back to `glob`, and a `scope` that is there and not text,
+`null` included, is never read as absent, so it cannot match a probe declared without one. Only a
+`scope` the item does not have at all, or an empty one, is the absent scope.
 
 A lockfile carries no timestamp and no absolute path, so two machines with the same configuration
 produce identical bytes. A mismatched `client` or `platform` is refused outright rather than

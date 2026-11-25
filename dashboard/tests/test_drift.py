@@ -1830,6 +1830,134 @@ class RecordedRefusalDriftTests(GlobBoundaryTests):
     test_a_new_match_linked_inside_the_anchor_is_an_addition = None
 
 
+def deny_listing(*names: str):
+    """`os.scandir` refusing every directory whose last component is in `names`."""
+    real = os.scandir
+
+    def scandir(path=".", *args, **kwargs):
+        if Path(os.fspath(path)).name in names:
+            raise PermissionError(13, "listing denied by the test", os.fspath(path))
+        return real(path, *args, **kwargs)
+
+    return mock.patch.object(os, "scandir", scandir)
+
+
+class BoundedWalkFactsTests(RecordedRefusalDriftTests):
+    """Eve's review of 0.17.0: an arrival, a refusal and an unlisted directory are
+    three facts of one walk, and a capture that was partial is not a baseline
+    of absence."""
+
+    PATTERN = "$USER_CONFIG/skills/**/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"][0].update({"max_depth": 6, "skip_hidden": True})
+        return document
+
+    def pattern_rows(self, report: dict) -> list[tuple[str, str]]:
+        return [
+            (row["state"], "refusal" if row["reason"] in PATH_SAFETY_REASONS else row["reason"])
+            for row in self.rows(report)
+            if row["anchor"] == self.PATTERN
+        ]
+
+    def setup_absence(self) -> Path:
+        (self.user_config / "skills" / "locked").mkdir(parents=True)
+        return self.capture()
+
+    def link_outside(self) -> None:
+        # The bounded walk never enters a symbolic link to a directory
+        # (`expand_glob`), so the refused match is a file link where the
+        # platform can make one, and a directory junction, which the walk
+        # does enter, where it cannot.
+        secret_dir = self.home / "secret-8a4f"
+        secret = self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        evil = self.user_config / "skills" / "evil"
+        evil.mkdir(parents=True)
+        try:
+            os.symlink(secret, evil / "SKILL.md")
+            return
+        except (OSError, NotImplementedError, AttributeError):
+            evil.rmdir()
+        self.link(evil, secret_dir)
+
+    def test_arrival_refusal_and_unlisted_directory_are_three_rows_of_one_walk(self) -> None:
+        from ledgerlib import drift as drift_module
+
+        ledger = self.setup_absence()
+        self.skill("aaa-new")
+        self.link_outside()
+        calls: list[object] = []
+        real = drift_module.expand_glob
+
+        def counted(*args, **kwargs):
+            calls.append(args[1])
+            return real(*args, **kwargs)
+
+        with deny_listing("locked"), mock.patch.object(drift_module, "expand_glob", counted):
+            code, report, _ = self.drift(ledger)
+        self.assertEqual(
+            self.pattern_rows(report),
+            [("DRIFTED", "appeared"), ("UNVERIFIABLE", "refusal"),
+             ("UNVERIFIABLE", "walk_incomplete")],
+        )
+        self.assertEqual(len(calls), 1, calls)
+        extras = [row for row in self.rows(report) if row["anchor"] == self.PATTERN][1:]
+        self.assertTrue(all(row["path"] is None for row in extras), extras)
+        self.assertNotIn("secret-8a4f", json.dumps(report))
+        self.assertEqual(code, 1)
+
+    def test_a_refusal_and_an_unlisted_directory_without_an_arrival(self) -> None:
+        ledger = self.setup_absence()
+        self.link_outside()
+        with deny_listing("locked"):
+            _code, report, _ = self.drift(ledger)
+        self.assertEqual(
+            self.pattern_rows(report),
+            [("UNVERIFIABLE", "refusal"), ("UNVERIFIABLE", "walk_incomplete")],
+        )
+
+    def test_an_absence_a_partial_capture_recorded_is_not_an_arrival_later(self) -> None:
+        (self.user_config / "skills" / "locked" / "old").mkdir(parents=True)
+        self.write(self.user_config / "skills" / "locked" / "old" / "SKILL.md", "# old\n")
+        with deny_listing("locked"):
+            ledger = self.capture()
+        recorded = json.loads(ledger.read_text(encoding="utf-8"))["baselines"][0]["items"]
+        self.assertTrue(all(item["attributes"].get("walk_incomplete") is True
+                            for item in recorded), recorded)
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(self.pattern_rows(report), [("UNVERIFIABLE", "capture_incomplete")])
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+        self.assertEqual(code, 1)
+
+    def test_a_partial_capture_does_not_turn_unseen_paths_into_arrivals(self) -> None:
+        self.skill("seen")
+        self.write(self.user_config / "skills" / "locked" / "old" / "SKILL.md", "# old\n")
+        with deny_listing("locked"):
+            ledger = self.capture()
+        code, report, _ = self.drift(ledger)
+        rows = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(rows["$USER_CONFIG/skills/seen/SKILL.md"], ("IN_PLACE", None))
+        self.assertEqual(rows["$USER_CONFIG/skills/locked/old/SKILL.md"],
+                         ("UNVERIFIABLE", "capture_incomplete"))
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+        self.assertEqual(code, 1)
+
+    def test_a_complete_capture_still_reports_an_arrival(self) -> None:
+        self.skill("seen")
+        ledger = self.capture()
+        self.skill("new")
+        _code, report, _ = self.drift(ledger)
+        rows = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(rows["$USER_CONFIG/skills/new/SKILL.md"], ("DRIFTED", "appeared"))
+
+    # The inherited scenarios run once, under the parent.
+    test_a_recorded_refusal_is_not_reopened = None
+    test_an_empty_root_holds_its_matches_to_the_anchor = None
+    test_an_empty_root_still_reports_a_real_arrival = None
+    test_an_arrival_and_a_refusal_are_both_reported = None
+
+
 class WalkUpDriftTests(GlobFixture):
     """0.16.0: `drift` re-asks every level a walking probe recorded.
 
