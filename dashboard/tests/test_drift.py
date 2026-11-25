@@ -2012,6 +2012,56 @@ class OverlappingCoverageTests(GlobFixture):
         self.assertLess(self.BROAD, self.NARROW)
         self.assert_the_complete_pattern_wins(self.NARROW)
 
+    def expansion(self, tail: str, *, fail: bool = False, unlisted: bool = False):
+        """`expand_glob` as `drift` calls it, changed for the pattern `tail` only."""
+        real = drift_module.expand_glob
+
+        def fake(root, asked, *rest):
+            if asked == tail and fail:
+                raise OSError(5, "expansion refused by the test")
+            found = real(root, asked, *rest)
+            if asked == tail and unlisted:
+                rest[-1].append(PermissionError(13, "listing denied by the test"))
+            return found
+
+        return mock.patch.object(drift_module, "expand_glob", fake)
+
+    # Eve's review of 0.17.1: a vote counts only from a pattern that enumerates
+    # and validates the path now, and the current walk is not the captured one.
+    def test_a_complete_pattern_that_cannot_be_expanded_now_proves_nothing(self) -> None:
+        ledger = self.capture_with_partial(self.BROAD)
+        self.skill("two")
+        with self.expansion("skills/t*/SKILL.md", fail=True):
+            code, report, stderr = self.drift(ledger)
+        rows = [
+            (row["state"], row["reason"])
+            for row in self.rows(report)
+            if row["anchor"] == "$USER_CONFIG/skills/two/SKILL.md"
+        ]
+        self.assertEqual(rows, [("UNVERIFIABLE", "capture_incomplete")])
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+        # The failed expansion is its own finding, not folded into the row.
+        self.assertIn(f"{self.NARROW!r} could not be re-enumerated (glob_failed)", stderr)
+        self.assertEqual(code, 1)
+
+    def test_a_complete_capture_still_proves_an_arrival_its_partial_walk_returns(
+        self,
+    ) -> None:
+        ledger = self.capture_with_partial(self.BROAD)
+        self.skill("two")
+        with self.expansion("skills/t*/SKILL.md", unlisted=True):
+            code, report, stderr = self.drift(ledger)
+        rows = [
+            (row["state"], row["reason"])
+            for row in self.rows(report)
+            if row["anchor"] == "$USER_CONFIG/skills/two/SKILL.md"
+        ]
+        # The capture listed its whole tree and did not hold the path, and the
+        # walk now returns it valid: an arrival, whatever else it missed.
+        self.assertEqual(rows, [("DRIFTED", "appeared")])
+        self.assertIn(f"{self.NARROW!r} could not be re-enumerated (walk_incomplete)", stderr)
+        self.assertEqual(code, 1)
+
     def test_a_path_only_partial_patterns_reach_stays_unverifiable(self) -> None:
         # Control: when every pattern that reaches the path was partial, the
         # stronger evidence is absent and the doubt is kept.

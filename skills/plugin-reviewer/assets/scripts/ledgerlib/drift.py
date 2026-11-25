@@ -557,7 +557,12 @@ def _glob_additions(
     # with different coverage; the complete one is evidence of an arrival the
     # partial one cannot give, so the strength of the evidence decides the
     # row before it is deduplicated, not which pattern sorts first (Eve's
-    # second review of 0.17.0).
+    # second review of 0.17.0). The vote is only of a pattern that enumerates
+    # and validates the path now (Eve's review of 0.17.1): one that cannot be
+    # expanded, or whose match is refused, proves nothing and its failure is a
+    # finding of its own; one whose walk now misses a directory still proves
+    # the paths it does return, since the capture it is compared with listed
+    # the whole tree.
     witnessed: set[tuple] = set()
     for key in sorted(groups):
         group = groups[key]
