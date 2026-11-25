@@ -461,9 +461,12 @@ def walk_options(source: object) -> tuple[int | None, bool] | None:
     """
     if not isinstance(source, Mapping):
         return (None, False)
-    max_depth = source.get("max_depth")
+    # Absent is the legacy walk; present is a limit, and `null` is not one
+    # (Eve's third review of 0.16.0): `.get` read it as absent and a
+    # hand-edited baseline lost its limit without a word.
+    max_depth = source["max_depth"] if "max_depth" in source else None
     skip_hidden = source.get("skip_hidden", False)
-    if max_depth is not None and (type(max_depth) is not int or max_depth < 0):
+    if "max_depth" in source and (type(max_depth) is not int or max_depth < 0):
         return None
     if type(skip_hidden) is not bool:
         return None

@@ -43,10 +43,13 @@ Only kinds an adapter marks `lockable` are pinned — the ones naming an install
 permission rules and environment variable names are deliberately left out: a lockfile that fails
 CI because somebody edited `CLAUDE.md` is one somebody switches off in the first week.
 
-The test is the probe's, not only its kind's: an item found by a probe without `lockable` stays out
-even when another probe of its kind is lockable, by the pattern the item records. The skills Codex
-caches under `$USER_CONFIG/skills/.system` are probed that way and never pinned; a system skill
-found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0).
+For a glob probe the test is also the probe's: an item whose recorded `glob`, kind and scope are
+exactly those of a probe without `lockable` stays out, even when another probe of its kind is
+lockable. The skills Codex caches under `$USER_CONFIG/skills/.system` are probed that way and never
+pinned; a system skill found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0). The
+match is on the recorded text, so the kind alone still decides for an item found by a literal
+`path` probe, for a level an `up_to` walk re-anchored to its own pattern, for a baseline that
+records no `glob`, and for an item whose `scope` or `glob` is not text.
 
 A lockfile carries no timestamp and no absolute path, so two machines with the same configuration
 produce identical bytes. A mismatched `client` or `platform` is refused outright rather than

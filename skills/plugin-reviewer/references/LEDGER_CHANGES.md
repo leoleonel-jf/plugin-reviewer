@@ -101,8 +101,9 @@ nothing, and for that item the file appearing is exactly the drift it looks like
 
 A match `scan` refused at the boundary of its probe's anchor is recorded `not_present` with the
 refusal as its reason, under the anchor its target resolves into. `drift` keeps that refusal: the
-item is `UNVERIFIABLE` with the same reason, its path is neither resolved, hashed nor offered to
-open, and a new capture is what can change it (0.16.0). Before, the stored form resolved inside
+item's own row is `UNVERIFIABLE` with the same reason, and its path is neither resolved, hashed nor
+offered to open; a new capture is what can change it (0.16.0). Re-asking a recorded pattern still
+lists the tree and resolves each match to test its anchor: that reads metadata, never bytes. Before, the stored form resolved inside
 the other anchor, its bytes were hashed, and a regular file there read as `appeared`. A recorded
 pattern whose walk limits sit beside a shape other than `<prefix>/**/<name>` is `UNVERIFIABLE`,
 `glob_failed`, and the report of every other item goes on.
@@ -115,7 +116,9 @@ holds it: one that resolves outside it, into another anchor or none, is one `UNV
 naming the pattern and the reason, never the path it reached, even when another probe recorded
 that path. A pattern recorded as its own absence is held to the same boundary: a match inside the
 anchor is `appeared` under the pattern's name, and one that resolves outside it is
-`UNVERIFIABLE` with the reason, its path not reported (0.16.0). A new path is new once, by kind,
+`UNVERIFIABLE` with the reason, its path not reported (0.16.0). When both kinds of match are
+there, the row is the arrival, `appeared`, and the refusal is not reported until a new capture
+records each match. A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the
