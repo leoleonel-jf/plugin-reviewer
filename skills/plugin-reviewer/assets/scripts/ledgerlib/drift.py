@@ -491,7 +491,11 @@ def _glob_additions(
     A probe is the pattern with the kind and scope its items carry, so one
     pattern serving two probes is asked once for each, and a new path is new
     when its `(kind, scope, anchor)` is nowhere in the baseline: two
-    overlapping patterns of one probe report it once, not twice.
+    overlapping patterns of one probe report it once, not twice. Which row
+    that is depends on the evidence, not on the order: the path is an
+    arrival when any pattern whose capture was complete reaches it, and
+    `capture_incomplete` only when every pattern that reaches it was
+    captured partially.
 
     A pattern whose only item is its own recorded absence (`anchor` equal to
     the pattern) is not expanded here: `_absent_pattern_rows` already
@@ -547,6 +551,14 @@ def _glob_additions(
     rows: list[dict] = []
     problems: list[tuple[str, str]] = []
     emitted: set[tuple] = set()
+    asked: list[tuple[dict, set[str], str | None]] = []
+    # The new identities a pattern whose capture listed its whole tree reaches
+    # now. Overlapping patterns of one kind and scope may reach the same path
+    # with different coverage; the complete one is evidence of an arrival the
+    # partial one cannot give, so the strength of the evidence decides the
+    # row before it is deduplicated, not which pattern sorts first (Eve's
+    # second review of 0.17.0).
+    witnessed: set[tuple] = set()
     for key in sorted(groups):
         group = groups[key]
         pattern, kind, scope = group["pattern"], group["kind"], group["scope"]
@@ -609,14 +621,23 @@ def _glob_additions(
             if (repr(kind), scope, stored) in identities:
                 continue
             found.add(stored)
+        asked.append((group, found, refused))
+        if not group["partial"]:
+            witnessed.update((repr(kind), scope, anchor) for anchor in found)
+
+    for group, found, refused in asked:
+        pattern, kind, scope = group["pattern"], group["kind"], group["scope"]
         for anchor in sorted(found):
-            if (repr(kind), scope, anchor) in emitted:
+            identity = (repr(kind), scope, anchor)
+            if identity in emitted:
                 continue
-            emitted.add((repr(kind), scope, anchor))
-            # The capture could not list part of this tree, so a path it does
-            # not hold may have been there unseen: not shown to be an
-            # arrival (Eve's review of 0.17.0). The recorded items keep their
-            # own comparison.
+            emitted.add(identity)
+            # Unless a pattern whose capture was complete reaches this path,
+            # every capture that does could not list part of its tree, so the
+            # path may have been there unseen: not shown to be an arrival
+            # (Eve's review of 0.17.0). The recorded items keep their own
+            # comparison.
+            arrived = identity in witnessed
             rows.append(
                 {
                     "kind": kind,
@@ -625,8 +646,8 @@ def _glob_additions(
                     "path": resolved_path(anchor, roots),
                     "scope": scope,
                     "recorded_state": None,
-                    "state": UNVERIFIABLE if group["partial"] else DRIFTED,
-                    "reason": "capture_incomplete" if group["partial"] else "appeared",
+                    "state": DRIFTED if arrived else UNVERIFIABLE,
+                    "reason": "appeared" if arrived else "capture_incomplete",
                 }
             )
         if refused is not None:
