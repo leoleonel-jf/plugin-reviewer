@@ -546,7 +546,12 @@ def _glob_additions(
 
     rows: list[dict] = []
     problems: list[tuple[str, str]] = []
-    emitted: set[tuple] = set()
+    # One row per new identity, kept where it was first emitted. A pattern
+    # whose capture was complete would have seen the path, so its answer, an
+    # arrival, outranks the `capture_incomplete` of an overlapping pattern
+    # that could not list part of the tree, whichever sorts first (Eve's
+    # second review of 0.17.0).
+    emitted: dict[tuple, dict] = {}
     for key in sorted(groups):
         group = groups[key]
         pattern, kind, scope = group["pattern"], group["kind"], group["scope"]
@@ -610,25 +615,28 @@ def _glob_additions(
                 continue
             found.add(stored)
         for anchor in sorted(found):
-            if (repr(kind), scope, anchor) in emitted:
+            identity = (repr(kind), scope, anchor)
+            known = emitted.get(identity)
+            if known is not None:
+                if not group["partial"]:
+                    known.update(state=DRIFTED, reason="appeared")
                 continue
-            emitted.add((repr(kind), scope, anchor))
             # The capture could not list part of this tree, so a path it does
             # not hold may have been there unseen: not shown to be an
             # arrival (Eve's review of 0.17.0). The recorded items keep their
             # own comparison.
-            rows.append(
-                {
-                    "kind": kind,
-                    "name": _leaf(anchor),
-                    "anchor": anchor,
-                    "path": resolved_path(anchor, roots),
-                    "scope": scope,
-                    "recorded_state": None,
-                    "state": UNVERIFIABLE if group["partial"] else DRIFTED,
-                    "reason": "capture_incomplete" if group["partial"] else "appeared",
-                }
-            )
+            row = {
+                "kind": kind,
+                "name": _leaf(anchor),
+                "anchor": anchor,
+                "path": resolved_path(anchor, roots),
+                "scope": scope,
+                "recorded_state": None,
+                "state": UNVERIFIABLE if group["partial"] else DRIFTED,
+                "reason": "capture_incomplete" if group["partial"] else "appeared",
+            }
+            emitted[identity] = row
+            rows.append(row)
         if refused is not None:
             rows.append(
                 {

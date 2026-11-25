@@ -1658,6 +1658,52 @@ class OverlappingPatternsTests(GlobFixture):
         self.assertEqual(report["summary"]["DRIFTED"], 1)
 
 
+class OverlappingCoverageTests(OverlappingPatternsTests):
+    """Eve's second review of 0.17.0: overlapping patterns of one probe, one
+    recorded as a partial capture and one as complete, answered a new path by
+    whichever pattern sorted first. The complete capture is the stronger
+    evidence: it would have seen the path, so the path is an arrival, in
+    either order."""
+
+    WIDE = "$USER_CONFIG/skills/*/SKILL.md"
+    NARROW = "$USER_CONFIG/skills/t*/SKILL.md"
+    NEW = "$USER_CONFIG/skills/two/SKILL.md"
+
+    def capture_marking(self, *partial: str) -> Path:
+        self.skill("tone")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        self.assertEqual(sorted(item["attributes"]["glob"] for item in items),
+                         [self.WIDE, self.NARROW])
+        for item in items:
+            if item["attributes"]["glob"] in partial:
+                item["attributes"]["walk_incomplete"] = True
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.skill("two")
+        return ledger
+
+    def new_rows(self, ledger: Path) -> list[tuple[str, str]]:
+        _code, report, _ = self.drift(ledger)
+        return [(row["state"], row["reason"]) for row in self.rows(report)
+                if row["anchor"] == self.NEW]
+
+    def test_the_partial_pattern_sorting_first_does_not_hide_an_arrival(self) -> None:
+        self.assertLess(self.WIDE, self.NARROW)
+        self.assertEqual(self.new_rows(self.capture_marking(self.WIDE)),
+                         [("DRIFTED", "appeared")])
+
+    def test_the_partial_pattern_sorting_last_does_not_hide_an_arrival(self) -> None:
+        self.assertEqual(self.new_rows(self.capture_marking(self.NARROW)),
+                         [("DRIFTED", "appeared")])
+
+    def test_two_partial_captures_still_do_not_prove_an_arrival(self) -> None:
+        self.assertEqual(self.new_rows(self.capture_marking(self.WIDE, self.NARROW)),
+                         [("UNVERIFIABLE", "capture_incomplete")])
+
+    test_two_overlapping_patterns_of_one_probe_report_an_addition_once = None
+
+
 class OnePatternTwoKindsTests(GlobFixture):
     """One pattern serving two probes is asked once for each (Eve, 0.14.0)."""
 

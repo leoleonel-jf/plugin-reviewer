@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.17.1 - 2026-11-25
+
+The low-severity reservation of Eve's second review of 0.17.0.
+
+- **Overlapping patterns no longer answer a new path by sort order.** When two patterns of one
+  probe (same kind and scope) reach the same new path and the baseline recorded one as a partial
+  capture (`walk_incomplete`) and the other as complete, `drift` reported whatever the pattern that
+  sorted first said: the partial one could leave `capture_incomplete` where the complete one shows
+  an arrival. The complete capture would have seen the path, so the row is now `DRIFTED`,
+  `appeared`, in either order; with every reaching pattern partial it stays `UNVERIFIABLE`,
+  `capture_incomplete`. Still one row per kind, scope and anchor. Tests cover both orders and the
+  all-partial control (`test_drift.OverlappingCoverageTests`).
+
 ## 0.17.0 - 2026-11-24
 
 The follow-ups Eve's reviews of 0.16.0 set aside for after that release: what the lock pins, what a
