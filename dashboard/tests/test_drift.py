@@ -1866,9 +1866,20 @@ class BoundedWalkFactsTests(RecordedRefusalDriftTests):
         return self.capture()
 
     def link_outside(self) -> None:
+        # The bounded walk never enters a symbolic link to a directory
+        # (`expand_glob`), so the refused match is a file link where the
+        # platform can make one, and a directory junction, which the walk
+        # does enter, where it cannot.
         secret_dir = self.home / "secret-8a4f"
-        self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
-        self.link(self.user_config / "skills" / "evil", secret_dir)
+        secret = self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        evil = self.user_config / "skills" / "evil"
+        evil.mkdir(parents=True)
+        try:
+            os.symlink(secret, evil / "SKILL.md")
+            return
+        except (OSError, NotImplementedError, AttributeError):
+            evil.rmdir()
+        self.link(evil, secret_dir)
 
     def test_arrival_refusal_and_unlisted_directory_are_three_rows_of_one_walk(self) -> None:
         from ledgerlib import drift as drift_module
