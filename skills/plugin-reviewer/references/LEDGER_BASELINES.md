@@ -162,6 +162,8 @@ a finding:
 | `pointer` | optional RFC 6901 JSON pointer, and only alongside `parse` |
 | `lockable` | optional boolean, false by omission: whether this probe's items are pinned into `agent.lock` |
 | `up_to` | optional, only alongside `glob`: a declared anchor other than the probe's own, `$NAME`; the pattern is also asked in every parent directory up to that anchor's root (from 0.16.0) |
+| `max_depth` | optional non-negative integer, only with a glob shaped `$ANCHOR/<prefix>/**/<name>`: the entry is looked for in the prefix and at most this many directories below it (from 0.16.0) |
+| `skip_hidden` | optional boolean, same shape: no directory below the prefix whose name starts with `.` is walked (from 0.16.0) |
 <!-- PROBE_FIELDS_END -->
 
 `glob` and `path` both pass `check_glob` at **load** time, under the rules in Adapter glob safety
@@ -185,6 +187,21 @@ skills of a module, of the directory between, and of the repository root, both c
 nothing above the root, and from outside any repository only the working directory's. Codex lets
 `project_root_markers` in `config.toml` replace `.git`; `codex.json` assumes the default and does not
 read that key.
+
+**Inside each skills root the walk is bounded the way Codex bounds it** (from 0.16.0, Eve's review).
+Codex walks every skills root recursively: a `SKILL.md` in the root itself or up to six directories
+below it, never inside a directory whose name starts with `.`. codex-cli 0.146.0 listed exactly those
+on 2026-11-23 (depths 0 to 6, not 7 or 8; a skill under `.hidden/` or `group/.cache/` not listed; one
+under `node_modules/` listed), as its loader's source says (`MAX_SCAN_DEPTH` 6,
+`HiddenDirectoryPolicy::Skip`). `codex.json` probes its four skills roots as `.../**/SKILL.md` with
+`max_depth: 6` and `skip_hidden: true`, and the skills Codex caches under `$USER_CONFIG/skills/.system`
+with a probe of their own, scope `system`, not lockable since every Codex update rewrites them. Each
+item records the limits beside its pattern, and `drift` walks with the same ones. Not matched: Codex
+follows a link to a directory inside a user or repository root. This walk does not follow a
+symbolic link, so a skill reached only through one is not found; a Windows junction is walked, and a
+match through it is held to the probe's anchor like any other, so one that lands outside is recorded
+as a refusal, never read. Codex's own limits on the number of directories and entries per root are
+not applied.
 
 Every item a `glob` probe produces, its matches and its `not_present` item alike, carries the
 pattern in `attributes.glob` (from 0.14.0). That is what lets `drift` expand the pattern again and

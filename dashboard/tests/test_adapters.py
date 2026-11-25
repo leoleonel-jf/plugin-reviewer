@@ -2286,9 +2286,11 @@ class WalkUpToRepositoryRootTests(unittest.TestCase):
                 {
                     "kind": "skill",
                     "scope": "project",
-                    "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+                    "glob": "$PROJECT/.agents/skills/**/SKILL.md",
                     "up_to": "$REPO_ROOT",
                     "lockable": True,
+                    "max_depth": 6,
+                    "skip_hidden": True,
                 }
             ],
         )
@@ -2355,6 +2357,70 @@ class WalkUpToRepositoryRootTests(unittest.TestCase):
                 )
         self.assertNotIn("REPO_ROOT", roots)
         self.assertIn("REPO_ROOT", unresolved)
+
+
+
+class BoundedSkillWalkTests(unittest.TestCase):
+    """Eve's review of 0.16.0: `max_depth` and `skip_hidden`, validated at load."""
+
+    def findings(self, **probe: object) -> list[str]:
+        base = {"kind": "skill", "scope": "user", "glob": "$USER_CONFIG/skills/**/SKILL.md"}
+        base.update(probe)
+        base = {key: value for key, value in base.items() if value is not None}
+        return adapters.validate_adapter(with_probe(base), source="t")
+
+    def test_the_shipped_walk_is_accepted(self) -> None:
+        self.assertEqual(self.findings(max_depth=6, skip_hidden=True), [])
+
+    def test_every_codex_skills_root_walks_six_levels_past_hidden_directories(self) -> None:
+        data = json.loads((ADAPTERS_DIR / "codex.json").read_text(encoding="utf-8"))
+        skills = [probe for probe in data["probes"] if probe["kind"] == "skill"]
+        self.assertEqual(
+            sorted(probe["glob"] for probe in skills),
+            sorted([
+                "$HOME/.agents/skills/**/SKILL.md",
+                "$USER_CONFIG/skills/**/SKILL.md",
+                "$USER_CONFIG/skills/.system/**/SKILL.md",
+                "$PROJECT/.agents/skills/**/SKILL.md",
+                "$SYSTEM_CONFIG/skills/**/SKILL.md",
+            ]),
+        )
+        for probe in skills:
+            with self.subTest(glob=probe["glob"]):
+                self.assertEqual(probe["max_depth"], 6)
+                self.assertIs(probe["skip_hidden"], True)
+        cached = next(p for p in skills if ".system" in p["glob"])
+        self.assertEqual(cached["scope"], "system")
+        self.assertNotIn("lockable", cached)
+
+    def test_a_bad_max_depth_is_refused(self) -> None:
+        for value in (-1, True, "6", 2.0):
+            with self.subTest(value=value):
+                found = self.findings(max_depth=value)
+                self.assertTrue(any("max_depth must be" in f for f in found), found)
+
+    def test_a_bad_skip_hidden_is_refused(self) -> None:
+        for value in (1, "yes"):
+            with self.subTest(value=value):
+                found = self.findings(skip_hidden=value)
+                self.assertTrue(any("skip_hidden must be" in f for f in found), found)
+
+    def test_the_glob_must_have_one_double_star_before_a_literal_name(self) -> None:
+        for glob in (
+            "$USER_CONFIG/skills/*/SKILL.md",
+            "$USER_CONFIG/skills/**/*.md",
+            "$USER_CONFIG/**/skills/**/SKILL.md",
+            "$USER_CONFIG/skills/**",
+            "$USER_CONFIG/sk*lls/**/SKILL.md",
+            "$USER_CONFIG/skills/**/x/SKILL.md",
+        ):
+            with self.subTest(glob=glob):
+                found = self.findings(glob=glob, max_depth=6)
+                self.assertTrue(any("require a glob shaped" in f for f in found), found)
+
+    def test_the_limits_require_a_glob(self) -> None:
+        found = self.findings(glob=None, path="$USER_CONFIG/x", skip_hidden=True)
+        self.assertTrue(any("require glob" in f for f in found), found)
 
 
 if __name__ == "__main__":

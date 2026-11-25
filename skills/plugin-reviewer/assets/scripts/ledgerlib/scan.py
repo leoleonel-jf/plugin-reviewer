@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 from collections.abc import Mapping, Sequence
@@ -377,8 +378,12 @@ def run_probe(
         return _walk_up(probe, reference, root, roots, patterns, excluded)
 
     tail = reference.group(2) or ""
+    options = walk_options(probe)
+    if options is None:
+        return [_item(probe, name=spec, anchor=spec, state="not_present",
+                      reason="malformed_probe")]
     try:
-        matches = [root] if not tail else list(root.glob(tail))
+        matches = [root] if not tail else expand_glob(root, tail, *options)
     except (
         OSError,
         ValueError,
@@ -427,18 +432,85 @@ def run_probe(
     if not items:
         # The probe's own pattern is the name, so the baseline records *what*
         # was absent rather than merely that something was.
-        return [_item(probe, name=spec, anchor=spec, state="not_present",
-                      reason="no_match", glob=spec)]
+        items = [_item(probe, name=spec, anchor=spec, state="not_present",
+                       reason="no_match", glob=spec)]
 
     # Every match carries the pattern that found it. Without it `drift` can
     # revisit only the paths recorded here and never asks the pattern again,
     # so a second Skill beside one that was captured is never reported
     # (finding 5 of the 2026-11-20 review). The pattern is adapter data, not
-    # file content.
+    # file content. The walk limits travel with it, so `drift` asks the same
+    # question `scan` asked (Eve's review of 0.16.0).
+    max_depth, skip_hidden = options
     for item in items:
         item["attributes"]["glob"] = spec
+        if max_depth is not None:
+            item["attributes"]["max_depth"] = max_depth
+        if skip_hidden:
+            item["attributes"]["skip_hidden"] = True
     items.sort(key=lambda item: item["anchor"])
     return items
+
+
+def walk_options(source: object) -> tuple[int | None, bool] | None:
+    """`(max_depth, skip_hidden)` from a probe or a recorded item's attributes.
+
+    `None` when either is present and malformed: a caller cannot ask the
+    question the probe meant, and must say so rather than walk without the
+    limit (which would report skills the client never loads).
+    """
+    if not isinstance(source, Mapping):
+        return (None, False)
+    max_depth = source.get("max_depth")
+    skip_hidden = source.get("skip_hidden", False)
+    if max_depth is not None and (type(max_depth) is not int or max_depth < 0):
+        return None
+    if type(skip_hidden) is not bool:
+        return None
+    return (max_depth, skip_hidden)
+
+
+def _unescape(segment: str) -> str:
+    """Undo `glob.escape` on one segment: `[[]` -> `[`, `[*]` -> `*`, `[?]` -> `?`."""
+    return re.sub(r"\[([*?\[])\]", r"\1", segment)
+
+
+def expand_glob(
+    root: Path, tail: str, max_depth: int | None = None, skip_hidden: bool = False
+) -> list[Path]:
+    """What a probe's pattern matches under `root`, with the walk limits applied.
+
+    Without limits this is `root.glob(tail)`, as it always was. With
+    `max_depth` or `skip_hidden` the pattern has the shape
+    `<literal prefix>/**/<name>` (`validate_adapter` refuses any other), and
+    the tree under the prefix is walked the way codex-cli 0.146.0 walks a
+    skills root: an entry `<name>` in the prefix itself or in a directory at
+    most `max_depth` levels below it, never inside a directory whose name
+    starts with `.` below the prefix, and never through a symbolic link to a
+    directory (`os.walk` without `followlinks`). Codex follows such links in
+    user and repository roots; a skill reached only through one is not found
+    here, a limit `LEDGER_BASELINES.md` states. A Windows junction is walked
+    by `os.walk` on every supported interpreter, and its matches are held to
+    the probe's anchor by `_probe_one` like any other.
+    """
+    if max_depth is None and not skip_hidden:
+        return list(root.glob(tail))
+    parts = tail.split("/")
+    star = parts.index("**")
+    prefix = [_unescape(part) for part in parts[:star]]
+    name = _unescape(parts[star + 1])
+    base = root.joinpath(*prefix)
+    found: list[Path] = []
+    for directory, dirnames, filenames in os.walk(base, followlinks=False):
+        here = Path(directory)
+        depth = len(here.relative_to(base).parts)
+        if name in filenames or name in dirnames:
+            found.append(here / name)
+        if skip_hidden:
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if max_depth is not None and depth >= max_depth:
+            dirnames[:] = []
+    return found
 
 
 def _walk_up(

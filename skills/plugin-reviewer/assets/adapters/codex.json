@@ -63,14 +63,25 @@
     {
       "kind": "skill",
       "scope": "user",
-      "glob": "$HOME/.agents/skills/*/SKILL.md",
-      "lockable": true
+      "glob": "$HOME/.agents/skills/**/SKILL.md",
+      "lockable": true,
+      "max_depth": 6,
+      "skip_hidden": true
     },
     {
       "kind": "skill",
       "scope": "user",
-      "glob": "$USER_CONFIG/skills/*/SKILL.md",
-      "lockable": true
+      "glob": "$USER_CONFIG/skills/**/SKILL.md",
+      "lockable": true,
+      "max_depth": 6,
+      "skip_hidden": true
+    },
+    {
+      "kind": "skill",
+      "scope": "system",
+      "glob": "$USER_CONFIG/skills/.system/**/SKILL.md",
+      "max_depth": 6,
+      "skip_hidden": true
     },
     {
       "kind": "hook",
@@ -124,9 +135,11 @@
     {
       "kind": "skill",
       "scope": "project",
-      "glob": "$PROJECT/.agents/skills/*/SKILL.md",
+      "glob": "$PROJECT/.agents/skills/**/SKILL.md",
       "up_to": "$REPO_ROOT",
-      "lockable": true
+      "lockable": true,
+      "max_depth": 6,
+      "skip_hidden": true
     },
     {
       "kind": "hook",
@@ -154,8 +167,10 @@
     {
       "kind": "skill",
       "scope": "system",
-      "glob": "$SYSTEM_CONFIG/skills/*/SKILL.md",
-      "lockable": true
+      "glob": "$SYSTEM_CONFIG/skills/**/SKILL.md",
+      "lockable": true,
+      "max_depth": 6,
+      "skip_hidden": true
     },
     {
       "kind": "hook",
