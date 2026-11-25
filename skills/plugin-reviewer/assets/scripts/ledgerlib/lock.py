@@ -126,7 +126,14 @@ def _entries(
         attributes = item.get("attributes")
         scope = attributes.get("scope") if isinstance(attributes, Mapping) else None
         pattern = attributes.get("glob") if isinstance(attributes, Mapping) else None
-        if (kind, scope, pattern) in unpinned:
+        # `validate_ledger` asks only that `attributes` be an object, so either
+        # value can be a list or an object in an imported or hand-edited
+        # baseline, and an unhashable one made the lookup below raise
+        # `TypeError` out of `lock` and `lock --check` (Eve's third review of
+        # 0.16.0). Only text is a recorded pattern; anything else leaves the
+        # item pinnable by its kind, as before 0.16.0.
+        match_scope = scope if isinstance(scope, str) and scope.strip() else None
+        if isinstance(pattern, str) and (kind, match_scope, pattern) in unpinned:
             # Found by a probe that is not lockable, though its kind is: the
             # skills Codex caches under `.system` change with every client
             # update and are no configuration of the user's (Eve's second

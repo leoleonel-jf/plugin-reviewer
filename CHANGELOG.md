@@ -8,7 +8,7 @@ The last two medium findings of the independent review of 2026-11-20, both about
 Skill and the scanner cover: a review that followed a link out of the package it was reviewing,
 and a Codex scan that saw one directory of a monorepo where the client loads several. Each was
 observed before it was changed, in isolated sessions, not only validated. Pull requests 55 and 56,
-and 58 and 59 for the reviews of the release.
+and 58, 59 and 60 for the reviews of the release.
 
 - **The review stays inside the candidate bundle** (finding 11). `references/REVIEW.md` said to
   open "every file it links", and nothing bounded where a link could lead. Observed on Claude Code
@@ -55,9 +55,12 @@ and 58 and 59 for the reviews of the release.
   with that reason, its bytes not hashed and its path not offered to open, where before its
   stored form resolved inside another anchor and a regular file there read as `appeared`. A
   pattern recorded as its own absence holds each new match to its anchor, as a pattern that
-  already matched did. `lock` applies a probe's `lockable` to the items that probe found, by the
-  pattern they record, so the `.system` cache stays out of `agent.lock` while a system skill a
-  lockable probe found stays in. A walk pattern of the wrong shape, from a hand-edited baseline,
+  already matched did. `lock` leaves out an item whose recorded pattern, kind and scope are those
+  of a glob probe without `lockable`, so the `.system` cache stays out of `agent.lock` while a
+  system skill a lockable probe found stays in; elsewhere (literal `path` probes, `up_to` levels,
+  baselines without the pattern, a `scope` or `glob` that is not text) the kind decides, as
+  before, and such metadata no longer makes `lock` raise (Eve's third review). A recorded
+  `max_depth: null` is a malformed limit, not an absent one. A walk pattern of the wrong shape, from a hand-edited baseline,
   is `glob_failed` instead of an `IndexError` that ended the report.
 
 No identifier, label or required field changed; a ledger written by 0.15.0 verifies and builds

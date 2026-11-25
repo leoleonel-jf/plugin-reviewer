@@ -3707,7 +3707,8 @@ class MalformedWalkLimitTests(unittest.TestCase):
             root = Path(tmp).resolve()
             (root / "skills" / "deep" / "x").mkdir(parents=True)
             (root / "skills" / "deep" / "x" / "SKILL.md").write_text("x", encoding="utf-8")
-            for limits in ({"max_depth": "6"}, {"max_depth": -1}, {"skip_hidden": "yes"}):
+            for limits in ({"max_depth": "6"}, {"max_depth": -1}, {"skip_hidden": "yes"},
+                           {"max_depth": None}, {"skip_hidden": None}):
                 with self.subTest(limits=limits):
                     probe = {"kind": "skill", "glob": "$USER_CONFIG/skills/**/SKILL.md", **limits}
                     items = run_probe(probe, {"USER_CONFIG": root}, [])

@@ -2014,6 +2014,21 @@ class BoundedWalkDriftTests(GlobFixture):
         self.assertNotIn("$PROJECT/.agents/skills/group/beta/SKILL.md", rows)
         self.assertIn(code, (0, 1))
 
+    def test_a_null_recorded_limit_is_unverifiable_not_dropped(self) -> None:
+        """Eve's third review of 0.16.0: `max_depth: null` read as absent, and the
+        walk lost its limit without a word."""
+        self.at("group/alpha")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"]["max_depth"] = None
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at(self.DEEP)
+        _code, report, stderr = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertFalse([row for row in rows if row["reason"] == "appeared"], rows)
+        self.assertIn("glob_failed", json.dumps(report) + stderr)
+
     def test_malformed_recorded_limits_are_unverifiable_not_walked(self) -> None:
         self.at("group/alpha")
         ledger = self.capture()
