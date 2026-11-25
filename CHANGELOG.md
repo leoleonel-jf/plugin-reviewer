@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.17.2 - 2026-11-25
+
+The reservation Eve's review of 0.17.1 left for the next pull request: which overlapping patterns
+vote on a new path, said and tested. No behaviour changes.
+
+- **Only a pattern that returns the path now votes.** Among the patterns of one kind and scope that
+  already had matches, the vote is of those that return the new path now, valid inside their
+  anchor. A completely captured pattern that cannot be expanded now gives no vote: when only a
+  partial pattern returns the path it stays `UNVERIFIABLE`, `capture_incomplete`, and the failed
+  expansion is a finding of its own. A completely captured pattern whose walk now misses a
+  directory still proves the paths it returns (`appeared`, with `walk_incomplete` as a finding).
+  A pattern recorded only as its own absence is answered by its own walk, as before. The 0.17.1
+  entry said "any pattern that reaches it"; this is what it means.
+
+No identifier, label or required field changed; a ledger written by 0.17.1 verifies and builds
+under 0.17.2. The new tests are proved by ablation.
+
 ## 0.17.1 - 2026-11-25
 
 The reservation Eve's second review of 0.17.0 left for the next pull request.
