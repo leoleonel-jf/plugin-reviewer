@@ -11,6 +11,7 @@ no JSON Schema library and never grows one. The two are held together by
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from collections.abc import Mapping
@@ -50,7 +51,7 @@ REQUIRED_ADAPTER_FIELDS = {
 ADAPTER_FIELDS = REQUIRED_ADAPTER_FIELDS | {"resolution"}
 
 REQUIRED_PROBE_FIELDS = {"kind"}
-PROBE_FIELDS = {"kind", "scope", "glob", "path", "parse", "pointer", "lockable"}
+PROBE_FIELDS = {"kind", "scope", "glob", "path", "parse", "pointer", "lockable", "up_to", "max_depth", "skip_hidden"}
 PARSE_FORMATS = {"json", "toml"}
 
 REQUIRED_RESOLUTION_FIELDS = {"mode"}
@@ -68,6 +69,16 @@ ENV_CANDIDATE_PREFIX = "$env:"
 # is not an absence anybody verified, it is a concept the platform does not
 # have. `platform_excluded_anchors` is what turns that distinction into data.
 PLATFORM_CANDIDATE_PREFIX = "$platform:"
+
+# `$ancestor:<name>` (0.16.0) -- the nearest directory, starting at the project
+# and walking up to the filesystem root, that holds an entry called `<name>`.
+# It is how an adapter names the root of the repository a project sits in:
+# Codex reads `.agents/skills` in the working directory and in every directory
+# above it up to the repository root, and from a monorepo module that is more
+# than one directory (finding 13 of the 2026-11-20 review). The entry is
+# tested without following links, and may be a file: a worktree's `.git` is
+# one, and codex-cli 0.146.0 took it as the root marker.
+ANCESTOR_CANDIDATE_PREFIX = "$ancestor:"
 
 # The client selected when detection finds no single answer. Looked up in the
 # candidate index by this name rather than opened as `generic.json` directly,
@@ -185,8 +196,13 @@ def validate_adapter(data: dict, *, source: str) -> list[str]:
     if not isinstance(probes, list):
         findings.append(f"{source}: probes must be an array")
     else:
+        declared = (
+            set(data["anchors"]) if isinstance(data["anchors"], dict) else set()
+        )
         for index, probe in enumerate(probes):
-            findings.extend(_validate_probe(probe, index, source=source))
+            findings.extend(
+                _validate_probe(probe, index, source=source, anchors=declared)
+            )
 
     patterns = data["sensitive_key_patterns"]
     if not isinstance(patterns, list):
@@ -253,10 +269,37 @@ def _validate_anchors(anchors: object, *, source: str) -> list[str]:
                     f"$platform: candidate, expected "
                     f"$platform:<system>:<path>: {candidate!r}"
                 )
+            elif (
+                candidate.startswith(ANCESTOR_CANDIDATE_PREFIX)
+                and _ancestor_marker(candidate) is None
+            ):
+                findings.append(
+                    f"{source}: anchors.{name}[{index}] is a malformed "
+                    f"$ancestor: candidate, expected $ancestor:<name> with one "
+                    f"plain file name: {candidate!r}"
+                )
     return findings
 
 
-def _validate_probe(probe: object, index: int, *, source: str) -> list[str]:
+def _ancestor_marker(candidate: str) -> str | None:
+    """`$ancestor:.git` -> `.git`, or None when the name is not one plain entry.
+
+    A separator, `.`, `..`, or a drive would turn the marker into a path that
+    reaches somewhere else; one file name is all the walk ever tests.
+    """
+    marker = candidate[len(ANCESTOR_CANDIDATE_PREFIX) :]
+    if (
+        not marker
+        or marker in (".", "..")
+        or any(ch in marker for ch in "/\\:\0")
+    ):
+        return None
+    return marker
+
+
+def _validate_probe(
+    probe: object, index: int, *, source: str, anchors: set | None = None
+) -> list[str]:
     label = f"{source}: probes[{index}]"
     if not isinstance(probe, dict):
         return [f"{label} must be an object"]
@@ -322,7 +365,72 @@ def _validate_probe(probe: object, index: int, *, source: str) -> list[str]:
         if not isinstance(pointer, str) or not pointer.startswith("/"):
             findings.append(f"{label} pointer must start with '/': {pointer!r}")
 
+    if "up_to" in probe:
+        findings.extend(_validate_up_to(probe, label=label, anchors=anchors))
+
+    if "max_depth" in probe or "skip_hidden" in probe:
+        findings.extend(_validate_walk(probe, label=label))
+
     return findings
+
+
+_WILDCARD = re.compile(r"[*?\[]")
+
+
+def _validate_walk(probe: dict, *, label: str) -> list[str]:
+    """`max_depth` and `skip_hidden` (0.16.0): a bounded walk, as Codex walks skills.
+
+    Both ride on a glob shaped `$ANCHOR/<literal prefix>/**/<name>`: one `**`,
+    no other wildcard, so the walk has a fixed directory to start from and
+    one entry name to look for. `scan.expand_glob` walks that tree.
+    """
+    findings: list[str] = []
+    if "max_depth" in probe:
+        depth = probe["max_depth"]
+        if type(depth) is not int or depth < 0:
+            findings.append(f"{label} max_depth must be a non-negative integer: {depth!r}")
+    if "skip_hidden" in probe and type(probe["skip_hidden"]) is not bool:
+        findings.append(f"{label} skip_hidden must be a boolean: {probe['skip_hidden']!r}")
+    pattern = probe.get("glob")
+    if not isinstance(pattern, str):
+        findings.append(f"{label} max_depth and skip_hidden require glob")
+        return findings
+    parts = pattern.replace("\\", "/").split("/")[1:]
+    if (
+        parts.count("**") != 1
+        or parts.index("**") != len(parts) - 2
+        or any(_WILDCARD.search(part) for i, part in enumerate(parts) if part != "**")
+        or not parts[-1]
+    ):
+        findings.append(
+            f"{label} max_depth and skip_hidden require a glob shaped "
+            f"$ANCHOR/<prefix>/**/<name> with no other wildcard: {pattern!r}"
+        )
+    return findings
+
+
+def _validate_up_to(probe: dict, *, label: str, anchors: set | None) -> list[str]:
+    """`up_to` (0.16.0): repeat a glob in every directory up to another anchor.
+
+    Only a glob carries it: a literal path names one file, and the walk exists
+    to ask one pattern at several levels. The value names a declared anchor
+    other than the probe's own, so the walk has a fixed place to stop.
+    """
+    target = probe["up_to"]
+    if not isinstance(probe.get("glob"), str):
+        return [f"{label} up_to requires glob"]
+    if (
+        not isinstance(target, str)
+        or not target.startswith("$")
+        or not ANCHOR_NAME.fullmatch(target[1:])
+    ):
+        return [f"{label} up_to must name an anchor as $NAME: {target!r}"]
+    if anchors is not None and target not in anchors:
+        return [f"{label} up_to names an anchor the adapter does not declare: {target!r}"]
+    own = probe["glob"].replace("\\", "/").split("/", 1)[0]
+    if own == target:
+        return [f"{label} up_to names the probe's own anchor: {target!r}"]
+    return []
 
 
 def _validate_resolution(
@@ -561,6 +669,14 @@ def _first_existing_directory(
             if not system.startswith(guard):
                 continue
             resolved = _candidate_path(path, project=project)
+        elif candidate.startswith(ANCESTOR_CANDIDATE_PREFIX):
+            marker = _ancestor_marker(candidate)
+            if marker is None or project is None:
+                continue
+            found = _nearest_holding(project, marker)
+            if found is not None:
+                return found
+            continue
         elif candidate.startswith(ENV_CANDIDATE_PREFIX):
             # Unset and empty are the same thing here. An empty variable is
             # what a shell leaves behind after `export CLAUDE_CONFIG_DIR=`,
@@ -580,6 +696,22 @@ def _first_existing_directory(
             # file would produce paths that can never resolve.
             if resolved.is_dir():
                 return resolved
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _nearest_holding(project: Path, marker: str) -> Path | None:
+    """The nearest of `project` and its parents that holds an entry `marker`.
+
+    `os.path.lexists` rather than `exists`: the marker is tested, not followed,
+    so a `.git` link counts as one and a dangling link is still the marker. A
+    directory the walk cannot stat is passed over, not an error.
+    """
+    for directory in (project, *project.parents):
+        try:
+            if os.path.lexists(directory / marker) and directory.is_dir():
+                return directory
         except (OSError, ValueError):
             continue
     return None

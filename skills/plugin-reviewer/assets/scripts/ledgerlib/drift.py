@@ -48,7 +48,7 @@ from ledgerlib.constants import (
     DATE,
     DRIFT_STATES,
 )
-from ledgerlib.errors import LedgerError, PathSafetyError
+from ledgerlib.errors import PATH_SAFETY_REASONS, LedgerError, PathSafetyError
 from ledgerlib.paths import (
     anchor_path,
     check_glob,
@@ -62,8 +62,10 @@ from ledgerlib.scan import (
     _within,
     _probe_target,
     _resolve_pointer,
+    expand_glob,
     redact,
     tomllib,
+    walk_options,
 )
 from ledgerlib.validate import validate_ledger
 
@@ -186,12 +188,22 @@ def classify_item(
         return UNVERIFIABLE, "digest_not_recorded"
 
     anchor = item.get("anchor")
+    refusal = recorded_refusal(item)
+    if refusal is not None:
+        # `scan` refused this path at its boundary and read nothing from it.
+        # Its stored form can still resolve inside another anchor, so
+        # resolving and hashing it here would read bytes the scan refused and
+        # could report a false arrival (Eve's second review of 0.16.0). The
+        # refusal stands until a new capture says otherwise.
+        return UNVERIFIABLE, refusal
     if (
         state == "not_present"
         and isinstance(anchor, str)
         and any(char in _GLOB_CHARS for char in anchor)
     ):
-        return _classify_absent_pattern(anchor, resolved)
+        return _classify_absent_pattern(
+            anchor, resolved, walk_options(item.get("attributes"))
+        )
 
     try:
         path = resolve_anchored(anchor, resolved)
@@ -234,6 +246,19 @@ def classify_item(
     if current == recorded:
         return IN_PLACE, None
     return DRIFTED, None
+
+
+def recorded_refusal(item: object) -> str | None:
+    """The path-safety reason a `not_present` item records, or None.
+
+    Such an item is a match `scan` refused at the boundary of its probe's
+    anchor: neither its bytes nor its path are drift's to visit.
+    """
+    if not isinstance(item, dict) or item.get("state") != "not_present":
+        return None
+    attributes = item.get("attributes")
+    reason = attributes.get("reason") if isinstance(attributes, dict) else None
+    return reason if isinstance(reason, str) and reason in PATH_SAFETY_REASONS else None
 
 
 def classify_target(
@@ -326,7 +351,9 @@ def _current_digest(path: Path) -> tuple[str | None, str | None]:
 
 
 def _classify_absent_pattern(
-    anchor: str, resolved: Mapping[str, Path]
+    anchor: str,
+    resolved: Mapping[str, Path],
+    options: tuple[int | None, bool] | None = (None, False),
 ) -> tuple[str, str | None]:
     """Re-check a recorded absence whose stored form is a glob pattern.
 
@@ -348,16 +375,40 @@ def _classify_absent_pattern(
     if root is None:
         return UNVERIFIABLE, "path_unknown_anchor"
     tail = reference.group(2) or ""
+    if options is None:
+        # The walk limits the item records are malformed: asking without
+        # them would count skills the client never loads as arrivals.
+        return UNVERIFIABLE, "glob_failed"
+    if not tail:
+        return (DRIFTED, "appeared") if root.is_dir() else (IN_PLACE, None)
     try:
-        matched = any(True for _ in root.glob(tail)) if tail else root.is_dir()
+        matches = expand_glob(root, tail, *options)
     except (OSError, ValueError, RecursionError, NotImplementedError):
         # The same refusal set `run_probe` catches around `Path.glob`, for
         # the same reason: a pattern the filesystem will not expand is a
         # finding, not a crash, and bare `RuntimeError` stays uncaught
         # because CPython reserves it for genuine defects.
         return UNVERIFIABLE, "glob_failed"
-    if matched:
+    # Each match is held to the boundary `scan` holds it to, as
+    # `_glob_additions` holds the matches of a pattern that already matched:
+    # a match that resolves outside the anchor the pattern names is not an
+    # arrival, and its path is not reported (Eve's second review of 0.16.0).
+    refused: str | None = None
+    for match in matches:
+        try:
+            stored, _portable = anchor_path(match, resolved)
+            path = resolve_anchored(stored, resolved)
+            if not _within(path, root):
+                raise PathSafetyError(
+                    "path resolves outside the anchor its probe named",
+                    reason="path_resolves_outside_anchor",
+                )
+        except PathSafetyError as exc:
+            refused = refused or exc.reason
+            continue
         return DRIFTED, "appeared"
+    if refused is not None:
+        return UNVERIFIABLE, refused
     return IN_PLACE, None
 
 
@@ -419,6 +470,7 @@ def _glob_additions(
                 "scope": scope,
                 "matched": False,
                 "anchors": set(),
+                "options": walk_options(attributes),
             },
         )
         if isinstance(anchor, str) and anchor != pattern:
@@ -447,8 +499,11 @@ def _glob_additions(
             problems.append((pattern, "path_unknown_anchor"))
             continue
         tail = reference.group(2) or ""
+        if group["options"] is None:
+            problems.append((pattern, "glob_failed"))
+            continue
         try:
-            matches = list(root.glob(tail)) if tail else [root]
+            matches = expand_glob(root, tail, *group["options"]) if tail else [root]
         except (OSError, ValueError, RecursionError, NotImplementedError):
             problems.append((pattern, "glob_failed"))
             continue
@@ -800,7 +855,13 @@ def drift_report(
                     "kind": item.get("kind") if isinstance(item, dict) else None,
                     "name": item.get("name") if isinstance(item, dict) else None,
                     "anchor": anchor,
-                    "path": resolved_path(anchor, roots),
+                    # A refused path is not offered to open: the dashboard's
+                    # Open would visit what `scan` refused.
+                    "path": (
+                        None
+                        if recorded_refusal(item) is not None
+                        else resolved_path(anchor, roots)
+                    ),
                     "scope": scope if isinstance(scope, str) else None,
                     "recorded_state": (
                         item.get("state") if isinstance(item, dict) else None

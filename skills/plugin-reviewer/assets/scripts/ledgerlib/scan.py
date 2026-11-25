@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import datetime
 import fnmatch
+import glob
 import hashlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 from collections.abc import Mapping, Sequence
@@ -372,9 +374,16 @@ def run_probe(
     if not is_glob:
         return _probe_one(probe, spec, roots, patterns, own_root=root)
 
+    if "up_to" in probe:
+        return _walk_up(probe, reference, root, roots, patterns, excluded)
+
     tail = reference.group(2) or ""
+    options = walk_options(probe)
+    if options is None:
+        return [_item(probe, name=spec, anchor=spec, state="not_present",
+                      reason="malformed_probe")]
     try:
-        matches = [root] if not tail else list(root.glob(tail))
+        matches = [root] if not tail else expand_glob(root, tail, *options)
     except (
         OSError,
         ValueError,
@@ -423,17 +432,164 @@ def run_probe(
     if not items:
         # The probe's own pattern is the name, so the baseline records *what*
         # was absent rather than merely that something was.
-        return [_item(probe, name=spec, anchor=spec, state="not_present",
-                      reason="no_match", glob=spec)]
+        items = [_item(probe, name=spec, anchor=spec, state="not_present",
+                       reason="no_match", glob=spec)]
 
     # Every match carries the pattern that found it. Without it `drift` can
     # revisit only the paths recorded here and never asks the pattern again,
     # so a second Skill beside one that was captured is never reported
     # (finding 5 of the 2026-11-20 review). The pattern is adapter data, not
-    # file content.
+    # file content. The walk limits travel with it, so `drift` asks the same
+    # question `scan` asked (Eve's review of 0.16.0).
+    max_depth, skip_hidden = options
     for item in items:
         item["attributes"]["glob"] = spec
+        if max_depth is not None:
+            item["attributes"]["max_depth"] = max_depth
+        if skip_hidden:
+            item["attributes"]["skip_hidden"] = True
     items.sort(key=lambda item: item["anchor"])
+    return items
+
+
+def walk_options(source: object) -> tuple[int | None, bool] | None:
+    """`(max_depth, skip_hidden)` from a probe or a recorded item's attributes.
+
+    `None` when either is present and malformed: a caller cannot ask the
+    question the probe meant, and must say so rather than walk without the
+    limit (which would report skills the client never loads).
+    """
+    if not isinstance(source, Mapping):
+        return (None, False)
+    # Absent is the legacy walk; present is a limit, and `null` is not one
+    # (Eve's third review of 0.16.0): `.get` read it as absent and a
+    # hand-edited baseline lost its limit without a word.
+    max_depth = source["max_depth"] if "max_depth" in source else None
+    skip_hidden = source.get("skip_hidden", False)
+    if "max_depth" in source and (type(max_depth) is not int or max_depth < 0):
+        return None
+    if type(skip_hidden) is not bool:
+        return None
+    return (max_depth, skip_hidden)
+
+
+_ESCAPED = re.compile(r"\[([*?\[])\]")
+_WILDCARD = re.compile(r"[*?\[]")
+
+
+def _unescape(segment: str) -> str:
+    """Undo `glob.escape` on one segment: `[[]` -> `[`, `[*]` -> `*`, `[?]` -> `?`."""
+    return _ESCAPED.sub(r"\1", segment)
+
+
+def expand_glob(
+    root: Path, tail: str, max_depth: int | None = None, skip_hidden: bool = False
+) -> list[Path]:
+    """What a probe's pattern matches under `root`, with the walk limits applied.
+
+    Without limits this is `root.glob(tail)`, as it always was. With
+    `max_depth` or `skip_hidden` the pattern has the shape
+    `<literal prefix>/**/<name>` (`validate_adapter` refuses any other), and
+    the tree under the prefix is walked the way codex-cli 0.146.0 walks a
+    skills root: an entry `<name>` in the prefix itself or in a directory at
+    most `max_depth` levels below it, never inside a directory whose name
+    starts with `.` below the prefix, and never through a symbolic link to a
+    directory (`os.walk` without `followlinks`). Codex follows such links in
+    user and repository roots; a skill reached only through one is not found
+    here, a limit `LEDGER_BASELINES.md` states. A Windows junction is walked
+    by `os.walk` on every supported interpreter, and its matches are held to
+    the probe's anchor by `_probe_one` like any other.
+    """
+    if max_depth is None and not skip_hidden:
+        return list(root.glob(tail))
+    parts = tail.split("/")
+    # The shape is checked here as well as in `validate_adapter`: a baseline
+    # reopened by `drift` carries the pattern and the limits as ledger
+    # content, and a pattern with no name after `**`, or a wildcard anywhere
+    # else, would otherwise raise `IndexError` in the middle of a report
+    # (Eve's second review of 0.16.0). `ValueError` is what every caller
+    # already turns into `glob_failed`. An escaped character (`[[]`, as
+    # `_walk_up` writes a directory name) is a literal, not a wildcard.
+    if (
+        parts.count("**") != 1
+        or parts.index("**") != len(parts) - 2
+        or not parts[-1]
+        or any(
+            _WILDCARD.search(_ESCAPED.sub("", part))
+            for part in parts
+            if part != "**"
+        )
+    ):
+        raise ValueError(
+            "a walk with max_depth or skip_hidden needs a pattern shaped "
+            f"<prefix>/**/<name> with no other wildcard: {tail!r}"
+        )
+    star = parts.index("**")
+    prefix = [_unescape(part) for part in parts[:star]]
+    name = _unescape(parts[star + 1])
+    base = root.joinpath(*prefix)
+    found: list[Path] = []
+    for directory, dirnames, filenames in os.walk(base, followlinks=False):
+        here = Path(directory)
+        depth = len(here.relative_to(base).parts)
+        if name in filenames or name in dirnames:
+            found.append(here / name)
+        if skip_hidden:
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if max_depth is not None and depth >= max_depth:
+            dirnames[:] = []
+    return found
+
+
+def _walk_up(
+    probe: dict,
+    reference: object,
+    root: Path,
+    roots: dict[str, Path],
+    patterns: Sequence[str],
+    excluded: frozenset[str],
+) -> list[dict]:
+    """A glob asked in its own anchor's root and in every directory above it.
+
+    `up_to` (0.16.0) names where the walk stops: the probe's pattern is asked
+    in `root`, then in each parent of `root` up to and including the root of
+    the `up_to` anchor, and never above it. Codex reads `.agents/skills` that
+    way, from the working directory up to the repository root, so a scan from
+    a monorepo module that asked the module alone recorded part of what the
+    client loads as if it were all of it (finding 13 of the 2026-11-20
+    review).
+
+    Each level is an ordinary probe of its own, anchored at the `up_to`
+    anchor: every match is re-checked against that anchor like any other, a
+    level that matches nothing is one `no_match` item naming its own pattern,
+    and every item keeps the pattern that found it, so `drift` re-asks each
+    level separately. A directory name goes into its level's pattern escaped,
+    so a `[` in it is a character and not a wildcard. Two skills of one name
+    at two levels are two items with two anchors.
+
+    When the `up_to` anchor did not resolve, is the same directory, or does
+    not contain `root`, no parent of `root` lies inside it and only `root` is
+    asked: from outside any repository Codex reads the working directory
+    alone, as codex-cli 0.146.0 did when this was written.
+    """
+    own = {key: value for key, value in probe.items() if key != "up_to"}
+    items = run_probe(own, roots, patterns, excluded)
+    target = probe["up_to"]
+    name = target[1:] if isinstance(target, str) and target.startswith("$") else ""
+    top = roots.get(name)
+    if top is None:
+        return items
+    tail = reference.group(2) or ""
+    for directory in root.parents:
+        if not _within(directory, top):
+            break
+        relative = directory.relative_to(top).as_posix()
+        level = f"${name}"
+        if relative != ".":
+            level += "/" + glob.escape(relative)
+        if tail:
+            level += "/" + tail
+        items.extend(run_probe(dict(own, glob=level), roots, patterns, excluded))
     return items
 
 

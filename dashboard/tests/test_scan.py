@@ -3261,5 +3261,466 @@ class BaselinePlatformFieldTests(ScanTestCase):
         self.assertEqual(entry["platform"], sys.platform)
 
 
+class CodexNestedProjectSkillTests(unittest.TestCase):
+    """Finding 13 of the 2026-11-20 review: project skills above a monorepo module.
+
+    Codex reads `.agents/skills` in the working directory and in every
+    directory above it up to the repository root. Observed on codex-cli
+    0.146.0 (Windows, 2026-11-23) with `skills/list` from an isolated
+    app-server, no model invoked, on the tree `module_tree` builds: from the
+    module it listed the module's two skills, the intermediate directory's
+    one, and the root's two, the two homonyms as separate entries with their
+    own paths, and nothing above the root; a `.git` file marked the root as a
+    `.git` directory does; with no `.git` anywhere it listed the module's
+    skills only. Before 0.16.0 the adapter probed the module alone, and a
+    scan from it recorded two skills where the client loads five.
+    """
+
+    MODULE_SKILLS = {"child-only", "shared"}
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = self.tmp / "home"
+        self.codex_home = self.tmp / "codex-home"
+        self.home.mkdir()
+        self.codex_home.mkdir()
+
+    def skill(self, root: Path, name: str) -> None:
+        path = root / ".agents" / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\nname: {name}\ndescription: fixture {root.name}\n---\n",
+            encoding="utf-8",
+        )
+
+    def module_tree(self, marker: str | None = "dir") -> tuple[Path, Path]:
+        outside = self.tmp / "outside"
+        repo = outside / "repo"
+        module = repo / "packages" / "mod"
+        module.mkdir(parents=True)
+        if marker == "dir":
+            (repo / ".git").mkdir()
+        elif marker == "file":
+            (repo / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+        self.skill(outside, "above-root")
+        self.skill(repo, "root-only")
+        self.skill(repo, "shared")
+        self.skill(repo / "packages", "middle")
+        self.skill(module, "child-only")
+        self.skill(module, "shared")
+        return repo, module
+
+    def scan_from(self, project: Path) -> dict:
+        with mock.patch.dict(
+            os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        ):
+            entry, _notes, _findings, _code = scan_detail(
+                identifier="BASE-2026-000",
+                client="codex",
+                bundled=ADAPTERS_DIR,
+                project=project,
+                environ={"CODEX_HOME": str(self.codex_home)},
+                captured_on="2026-11-23",
+            )
+        return entry
+
+    @staticmethod
+    def present_skills(entry: dict) -> list[str]:
+        return sorted(
+            item["anchor"]
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        )
+
+    def test_codex_nested_project_reports_parent_and_child_skills(self) -> None:
+        _repo, module = self.module_tree()
+        entry = self.scan_from(module)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/child-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+                "$REPO_ROOT/.agents/skills/root-only/SKILL.md",
+                "$REPO_ROOT/.agents/skills/shared/SKILL.md",
+                "$REPO_ROOT/packages/.agents/skills/middle/SKILL.md",
+            ],
+        )
+
+    def test_each_level_keeps_the_pattern_that_found_it(self) -> None:
+        """`drift` re-asks every recorded pattern, one per directory walked."""
+        _repo, module = self.module_tree()
+        entry = self.scan_from(module)
+        globs = {
+            item["anchor"]: item["attributes"].get("glob")
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        }
+        self.assertEqual(
+            globs["$REPO_ROOT/packages/.agents/skills/middle/SKILL.md"],
+            "$REPO_ROOT/packages/.agents/skills/**/SKILL.md",
+        )
+        self.assertEqual(
+            globs["$REPO_ROOT/.agents/skills/root-only/SKILL.md"],
+            "$REPO_ROOT/.agents/skills/**/SKILL.md",
+        )
+
+    def test_an_empty_intermediate_level_is_recorded_as_looked_at(self) -> None:
+        repo, module = self.module_tree()
+        shutil.rmtree(repo / "packages" / ".agents")
+        entry = self.scan_from(module)
+        absent = [
+            item for item in entry["items"]
+            if item["kind"] == "skill"
+            and item["anchor"] == "$REPO_ROOT/packages/.agents/skills/**/SKILL.md"
+        ]
+        self.assertEqual(len(absent), 1, entry["items"])
+        self.assertEqual(absent[0]["state"], "not_present")
+        self.assertEqual(absent[0]["attributes"].get("reason"), "no_match")
+
+    def test_a_git_file_marks_the_root_as_a_git_directory_does(self) -> None:
+        _repo, module = self.module_tree(marker="file")
+        entry = self.scan_from(module)
+        self.assertIn(
+            "$REPO_ROOT/packages/.agents/skills/middle/SKILL.md",
+            self.present_skills(entry),
+        )
+
+    def test_without_a_repository_only_the_module_is_read(self) -> None:
+        _repo, module = self.module_tree(marker=None)
+        entry = self.scan_from(module)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/child-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+            ],
+        )
+        # Nothing above the module is read, as the client reads nothing there.
+        self.assertFalse(
+            [
+                item for item in entry["items"]
+                if item["kind"] == "skill" and "REPO_ROOT" in item["anchor"]
+            ],
+            entry["items"],
+        )
+
+    def test_a_bracket_in_a_directory_name_is_a_character_not_a_wildcard(
+        self,
+    ) -> None:
+        repo = self.tmp / "repo"
+        middle = repo / "pk[1]"
+        module = middle / "mod"
+        module.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.skill(middle, "middle")
+        # Would match `pk[1]` read as a character class, and must not be read.
+        self.skill(repo / "pk1", "decoy")
+        entry = self.scan_from(module)
+        present = [
+            item for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        ]
+        self.assertEqual(
+            [item["anchor"] for item in present],
+            ["$REPO_ROOT/pk[1]/.agents/skills/middle/SKILL.md"],
+        )
+        self.assertEqual(
+            present[0]["attributes"]["glob"],
+            "$REPO_ROOT/pk[[]1]/.agents/skills/**/SKILL.md",
+        )
+
+    def test_a_scan_from_the_root_records_each_skill_once(self) -> None:
+        repo, _module = self.module_tree()
+        entry = self.scan_from(repo)
+        anchors = [
+            item["anchor"] for item in entry["items"] if item["kind"] == "skill"
+        ]
+        self.assertEqual(len(anchors), len(set(anchors)), anchors)
+        self.assertEqual(
+            self.present_skills(entry),
+            [
+                "$PROJECT/.agents/skills/root-only/SKILL.md",
+                "$PROJECT/.agents/skills/shared/SKILL.md",
+            ],
+        )
+
+
+class CodexSkillTreeTests(CodexNestedProjectSkillTests):
+    """Eve's review of 0.16.0: inside a skills root Codex walks a tree, not one level.
+
+    codex-cli 0.146.0, `skills/list` from an isolated app-server on
+    2026-11-23, one repository root: it listed a `SKILL.md` directly in
+    `.agents/skills`, and at depths 1 to 6 below it, not 7 or 8; two skills
+    under a group directory; one under `node_modules/`; nothing under
+    `.hidden/` or `group/.cache/`. Its loader says the same
+    (`MAX_SCAN_DEPTH` 6, hidden directories skipped).
+    """
+
+    def at(self, base: Path, relative: str) -> None:
+        path = base / ".agents" / "skills" / relative / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\nname: x\ndescription: fixture\n---\n", encoding="utf-8")
+
+    def tree(self, base: Path) -> None:
+        self.at(base, ".")
+        self.at(base, "/".join(f"d{n}" for n in range(1, 9)))
+        for depth in range(1, 8):
+            # One SKILL.md at every depth of the same chain.
+            self.at(base, "/".join(f"d{n}" for n in range(1, depth + 1)))
+        self.at(base, "group/alpha")
+        self.at(base, "group/beta")
+        self.at(base, ".hidden/secret")
+        self.at(base, "group/.cache/x")
+        self.at(base, "node_modules/pkg")
+
+    def expected(self, anchor: str) -> list[str]:
+        chain = [""] + ["/".join(f"d{n}" for n in range(1, depth + 1)) + "/"
+                        for depth in range(1, 7)]
+        relatives = [*chain, "group/alpha/", "group/beta/", "node_modules/pkg/"]
+        return sorted(f"{anchor}/.agents/skills/{rel}SKILL.md" for rel in relatives)
+
+    def test_a_project_root_is_walked_six_levels_deep_past_hidden_directories(
+        self,
+    ) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        self.tree(repo)
+        entry = self.scan_from(repo)
+        self.assertEqual(self.present_skills(entry), self.expected("$PROJECT"))
+
+    def test_a_parent_level_is_walked_the_same_way(self) -> None:
+        repo = self.tmp / "repo"
+        module = repo / "mod"
+        module.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.tree(repo)
+        entry = self.scan_from(module)
+        self.assertEqual(self.present_skills(entry), self.expected("$REPO_ROOT"))
+
+    def test_every_item_records_the_limits_beside_its_pattern(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        self.at(repo, "group/alpha")
+        entry = self.scan_from(repo)
+        skills = [
+            item for item in entry["items"]
+            if item["kind"] == "skill"
+            and item["attributes"].get("reason") != "unresolved_anchor"
+        ]
+        self.assertTrue(skills)
+        for item in skills:
+            with self.subTest(anchor=item["anchor"]):
+                self.assertTrue(item["attributes"]["glob"].endswith("/**/SKILL.md"))
+                self.assertEqual(item["attributes"]["max_depth"], 6)
+                self.assertIs(item["attributes"]["skip_hidden"], True)
+
+    def test_the_skills_codex_caches_are_their_own_system_layer(self) -> None:
+        cached = self.codex_home / "skills" / ".system" / "imagegen" / "SKILL.md"
+        cached.parent.mkdir(parents=True)
+        cached.write_text("---\nname: imagegen\ndescription: x\n---\n", encoding="utf-8")
+        user = self.codex_home / "skills" / "mine" / "SKILL.md"
+        user.parent.mkdir(parents=True)
+        user.write_text("---\nname: mine\ndescription: x\n---\n", encoding="utf-8")
+        project = self.tmp / "project"
+        project.mkdir()
+        entry = self.scan_from(project)
+        scopes = {
+            item["anchor"]: item["attributes"].get("scope")
+            for item in entry["items"]
+            if item["kind"] == "skill" and item["state"] == "present"
+        }
+        self.assertEqual(
+            scopes,
+            {
+                "$USER_CONFIG/skills/.system/imagegen/SKILL.md": "system",
+                "$USER_CONFIG/skills/mine/SKILL.md": "user",
+            },
+        )
+
+    def lock_entries(self, items: list[dict]) -> list[dict]:
+        """`lock` run as the command runs it, with the bundled Codex adapter."""
+        from ledgerlib.lock import lock_command
+
+        ledger = self.tmp / "ledger.json"
+        ledger.write_text(
+            json.dumps(
+                {
+                    "client": "codex",
+                    "baselines": [
+                        {
+                            "id": "BASE-2026-000",
+                            "client": "codex",
+                            "adapter_version": 3,
+                            "platform": sys.platform,
+                            "items": items,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = lock_command(
+                ledger=ledger,
+                baseline_id="BASE-2026-000",
+                check=None,
+                out=None,
+                force=False,
+                adapter=ADAPTERS_DIR / "codex.json",
+                project=self.tmp,
+            )
+        self.assertEqual(code, 0)
+        return json.loads(out.getvalue())["entries"]
+
+    def test_the_cached_system_skills_stay_out_of_the_lock(self) -> None:
+        """Eve's second review of 0.16.0: one lockable `skill` probe made every
+        skill pinnable, so the `.system` cache, which changes with each client
+        update, went into `agent.lock`. The user's skill goes in, the cache
+        does not, and a system skill a lockable probe found still does."""
+        cached = self.codex_home / "skills" / ".system" / "imagegen" / "SKILL.md"
+        cached.parent.mkdir(parents=True)
+        cached.write_text("---\nname: imagegen\ndescription: x\n---\n", encoding="utf-8")
+        user = self.codex_home / "skills" / "mine" / "SKILL.md"
+        user.parent.mkdir(parents=True)
+        user.write_text("---\nname: mine\ndescription: x\n---\n", encoding="utf-8")
+        project = self.tmp / "project"
+        project.mkdir()
+        items = self.scan_from(project)["items"]
+        self.assertIn(
+            "$USER_CONFIG/skills/.system/imagegen/SKILL.md",
+            [item["anchor"] for item in items],
+        )
+        # A system skill found by the lockable `$SYSTEM_CONFIG` probe, as a
+        # baseline from Linux records it (no fixture can write /etc/codex).
+        items.append(
+            {
+                "kind": "skill",
+                "name": "SKILL.md",
+                "anchor": "$SYSTEM_CONFIG/skills/admin/SKILL.md",
+                "digest": "sha256:" + "b" * 64,
+                "attributes": {
+                    "scope": "system",
+                    "glob": "$SYSTEM_CONFIG/skills/**/SKILL.md",
+                    "max_depth": 6,
+                    "skip_hidden": True,
+                },
+                "origin": "pre-existing",
+                "state": "present",
+                "portable": True,
+            }
+        )
+        pinned = sorted(
+            entry["anchor"]
+            for entry in self.lock_entries(items)
+            if entry["kind"] == "skill" and entry["state"] == "present"
+        )
+        self.assertEqual(
+            pinned,
+            [
+                "$SYSTEM_CONFIG/skills/admin/SKILL.md",
+                "$USER_CONFIG/skills/mine/SKILL.md",
+            ],
+        )
+
+    def test_unpinned_patterns_name_the_cache_probe_alone(self) -> None:
+        from ledgerlib.lock import unpinned_patterns
+
+        adapter = json.loads((ADAPTERS_DIR / "codex.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            unpinned_patterns(adapter),
+            {("skill", "system", "$USER_CONFIG/skills/.system/**/SKILL.md")},
+        )
+        # A pattern a lockable probe also declares stays pinnable.
+        adapter["probes"].append(
+            {
+                "kind": "skill",
+                "scope": "system",
+                "glob": "$USER_CONFIG/skills/.system/**/SKILL.md",
+                "lockable": True,
+            }
+        )
+        self.assertEqual(unpinned_patterns(adapter), frozenset())
+
+    def test_a_link_to_a_directory_is_not_followed(self) -> None:
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        outside = self.tmp / "elsewhere" / "linked"
+        outside.mkdir(parents=True)
+        (outside / "SKILL.md").write_text("x", encoding="utf-8")
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        link = repo / ".agents" / "skills" / "linked"
+        junction = False
+        try:
+            os.symlink(outside, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            if os.name != "nt":
+                self.skipTest("cannot create a directory link here")
+            # Without the symlink privilege, a junction: `os.walk` walks it.
+            done = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                capture_output=True,
+            )
+            if done.returncode != 0:
+                self.skipTest("cannot create a junction here")
+            junction = True
+        entry = self.scan_from(repo)
+        # Never recorded as a skill of this root, followed or not.
+        self.assertEqual(self.present_skills(entry), [])
+        if junction:
+            refused = [
+                item for item in entry["items"]
+                if item["kind"] == "skill"
+                and item["attributes"].get("reason") in PATH_SAFETY_REASONS
+            ]
+            self.assertEqual(len(refused), 1, entry["items"])
+
+
+class MalformedWalkLimitTests(unittest.TestCase):
+    """A hand-built probe with malformed limits is recorded, not walked without them."""
+
+    def test_a_walk_refuses_a_pattern_of_the_wrong_shape(self) -> None:
+        """Eve's second review of 0.16.0: the shape is checked where the walk
+        happens, since `drift` reopens patterns no adapter validation saw."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "skills" / "x").mkdir(parents=True)
+            for tail in ("skills/**", "skills/**/", "skills/*/**/SKILL.md",
+                         "**/a/**/SKILL.md", "skills/**/SKILL*", "skills/SKILL.md"):
+                with self.subTest(tail=tail):
+                    with self.assertRaises(ValueError):
+                        scan_module.expand_glob(root, tail, 6, True)
+            # A name escaped the way `_walk_up` writes it is a literal.
+            (root / "a[1]" / "skills" / "x" / "SKILL.md").parent.mkdir(parents=True)
+            (root / "a[1]" / "skills" / "x" / "SKILL.md").write_text("x", encoding="utf-8")
+            self.assertEqual(
+                scan_module.expand_glob(root, "a[[]1]/skills/**/SKILL.md", 6, True),
+                [root / "a[1]" / "skills" / "x" / "SKILL.md"],
+            )
+
+    def test_a_malformed_limit_is_a_malformed_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "skills" / "deep" / "x").mkdir(parents=True)
+            (root / "skills" / "deep" / "x" / "SKILL.md").write_text("x", encoding="utf-8")
+            for limits in ({"max_depth": "6"}, {"max_depth": -1}, {"skip_hidden": "yes"},
+                           {"max_depth": None}, {"skip_hidden": None}):
+                with self.subTest(limits=limits):
+                    probe = {"kind": "skill", "glob": "$USER_CONFIG/skills/**/SKILL.md", **limits}
+                    items = run_probe(probe, {"USER_CONFIG": root}, [])
+                    self.assertEqual(len(items), 1, items)
+                    self.assertEqual(items[0]["state"], "not_present")
+                    self.assertEqual(items[0]["attributes"]["reason"], "malformed_probe")
+
+
+# The fixture is shared; the parent's tests run once, under the parent.
+for _name in [name for name in vars(CodexNestedProjectSkillTests) if name.startswith("test_")]:
+    setattr(CodexSkillTreeTests, _name, None)
+
+
 if __name__ == "__main__":
     unittest.main()

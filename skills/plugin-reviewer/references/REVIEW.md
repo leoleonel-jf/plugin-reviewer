@@ -15,6 +15,12 @@ you, and say so when you could not.
   where it is, and remove it afterwards or say that it stays. Do not use the
   client's install command to obtain it: in Claude Code, "Installing a plugin also enables it"
   unless the entry says otherwise (`code.claude.com/docs/en/plugins/security.md`).
+- Read only inside the copy. Every file opened because the package points to it resolves, links
+  followed, to a regular file inside it. A manifest path, a link, or a reference that points
+  outside is reported with its target and not read: it is not what the package ships, and it can
+  reach files that have nothing to do with the review. These references, a primary source chosen
+  to check a claim, and the read-only comparison with the user's setup are the review's own steps,
+  not places the package led to.
 - If seeing the source takes a login, a payment, or a credential, stop and say so. A package whose
   code cannot be read cannot be reviewed, only tried.
 
@@ -78,7 +84,10 @@ Then:
 
 ## A skill
 
-Open `SKILL.md` whole, every file it links, and every script in its directory.
+Open `SKILL.md` whole, every file it links inside the skill's directory, and every script there.
+A link that resolves outside that directory, through `..`, an absolute path, or a symbolic link,
+is not part of what installs: report it as a dependency the package does not ship, with where it
+points and what would load there once installed, and leave it unopened.
 
 - **Front matter.** In Claude Code, `allowed-tools` lists "Tools Claude can use without asking
   permission during the turn that invokes this skill" (`code.claude.com/docs/en/skills.md`). The

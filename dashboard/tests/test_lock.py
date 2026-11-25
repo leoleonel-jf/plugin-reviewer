@@ -180,6 +180,58 @@ class BuildLockTests(unittest.TestCase):
         self.assertTrue(entry["digest"].startswith("sha256:"))
 
 
+class UnpinnedPatternMetadataTests(unittest.TestCase):
+    """Eve's third review of 0.16.0: the probe filter meets whatever the ledger holds.
+
+    `validate_ledger` asks only that `attributes` be an object, so `scope`
+    and `glob` can be a list or an object in an imported or hand-edited
+    baseline. Looked up in the set of unpinned patterns, an unhashable one
+    raised `TypeError` out of both `lock` and `lock --check`.
+    """
+
+    CACHE = "$USER_CONFIG/skills/.system/**/SKILL.md"
+    UNPINNED = frozenset({("skill", "system", CACHE)})
+
+    def document(self) -> dict:
+        return ledger(
+            items=[
+                item("skill", "valid"),
+                item("skill", "scope-list", attributes={"scope": ["user"], "glob": self.CACHE}),
+                item("skill", "glob-object", attributes={"scope": "system", "glob": {"x": 1}}),
+                item("skill", "both", attributes={"scope": {"a": 1}, "glob": ["x"]}),
+                item("skill", "cached", anchor="$USER_CONFIG/skills/.system/c/SKILL.md",
+                     attributes={"scope": "system", "glob": self.CACHE}),
+            ]
+        )
+
+    def test_generation_keeps_atypical_items_by_their_kind(self) -> None:
+        built = build_lock(
+            self.document(), baseline_id="BASE-2026-000",
+            lockable=LOCKABLE_KINDS, unpinned=self.UNPINNED,
+        )
+        self.assertEqual(
+            sorted(entry["name"] for entry in built["entries"]),
+            ["both", "glob-object", "scope-list", "valid"],
+        )
+
+    def test_the_check_compares_them_without_raising(self) -> None:
+        document = self.document()
+        locked = build_lock(
+            document, baseline_id="BASE-2026-000",
+            lockable=LOCKABLE_KINDS, unpinned=self.UNPINNED,
+        )
+        rows, code = check_lock(
+            locked, document, lockable=LOCKABLE_KINDS, unpinned=self.UNPINNED
+        )
+        self.assertEqual((rows, code), ([], 0))
+        document["baselines"][0]["items"][0]["digest"] = "sha256:" + "c" * 64
+        rows, code = check_lock(
+            locked, document, lockable=LOCKABLE_KINDS, unpinned=self.UNPINNED
+        )
+        self.assertEqual([(row["name"], row["difference"]) for row in rows], [("valid", "changed")])
+        self.assertEqual(code, 1)
+
+
 class DeterminismTests(unittest.TestCase):
     def render(self, document: dict) -> str:
         return lock_module.render_lock(

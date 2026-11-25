@@ -1726,3 +1726,320 @@ class BoundaryBeforeIdentityTests(GlobBoundaryTests):
     test_a_new_match_linked_into_another_anchor_is_refused = None
     test_a_new_match_linked_outside_every_anchor_is_refused = None
     test_a_new_match_linked_inside_the_anchor_is_an_addition = None
+
+
+class RecordedRefusalDriftTests(GlobBoundaryTests):
+    """Eve's second review of 0.16.0: a refusal `scan` recorded is kept by `drift`.
+
+    `scan` stores a match it refused under the anchor its target resolves
+    into, so the stored form of a link from `$USER_CONFIG` into `$HOME` is a
+    well-formed `$HOME/...`. `drift` resolved that form and hashed the file
+    before looking at why the item was absent: it read bytes the scan had
+    refused and reported them as configuration that appeared. And a pattern
+    recorded as its own absence counted any match as an arrival, without the
+    boundary held to the matches of a pattern that already matched.
+    """
+
+    def reads(self) -> tuple[list[Path], object]:
+        """A `file_digest` that records every path `drift` hashes."""
+        from ledgerlib import drift as drift_module
+
+        seen: list[Path] = []
+        real = drift_module.file_digest
+
+        def spy(path: Path) -> str:
+            seen.append(Path(path).resolve())
+            return real(path)
+
+        return seen, mock.patch.object(drift_module, "file_digest", spy)
+
+    def test_a_recorded_refusal_is_not_reopened(self) -> None:
+        self.skill("one")
+        secret_dir = self.home / "secret-9d3a"
+        secret = self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        ledger = self.capture()
+        recorded = json.loads(ledger.read_text(encoding="utf-8"))["baselines"][0]["items"]
+        refused = [
+            item for item in recorded
+            if item["attributes"].get("reason") in PATH_SAFETY_REASONS
+        ]
+        self.assertEqual(len(refused), 1, recorded)
+        self.assertTrue(refused[0]["anchor"].startswith("$HOME/"), refused)
+        seen, patch = self.reads()
+        with patch:
+            code, report, _ = self.drift(ledger)
+        self.assertNotIn(secret.resolve(), seen)
+        rows = self.rows(report)
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+        row = next(row for row in rows if row["anchor"] == refused[0]["anchor"])
+        self.assertEqual(row["state"], "UNVERIFIABLE")
+        self.assertIn(row["reason"], PATH_SAFETY_REASONS)
+        self.assertIsNone(row["path"])
+        self.assertEqual(code, 1)
+
+    def test_an_empty_root_holds_its_matches_to_the_anchor(self) -> None:
+        (self.user_config / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        secret_dir = self.home / "secret-2f8b"
+        self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        code, report, _ = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertNotIn("secret-2f8b", json.dumps(report))
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+        row = next(row for row in rows if row["anchor"] == self.PATTERN)
+        self.assertEqual(row["state"], "UNVERIFIABLE")
+        self.assertIn(row["reason"], PATH_SAFETY_REASONS)
+        self.assertEqual(code, 1)
+
+    def test_an_empty_root_still_reports_a_real_arrival(self) -> None:
+        (self.user_config / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        self.skill("new")
+        code, report, _ = self.drift(ledger)
+        row = next(row for row in self.rows(report) if row["anchor"] == self.PATTERN)
+        self.assertEqual((row["state"], row["reason"]), ("DRIFTED", "appeared"))
+        self.assertEqual(code, 1)
+
+    # The inherited scenarios are about a pattern that already matched.
+    test_a_new_match_linked_into_another_anchor_is_refused = None
+    test_a_new_match_linked_outside_every_anchor_is_refused = None
+    test_a_new_match_linked_inside_the_anchor_is_an_addition = None
+
+
+class WalkUpDriftTests(GlobFixture):
+    """0.16.0: `drift` re-asks every level a walking probe recorded.
+
+    The probe reads `.agents/skills` from the project up to `$REPO_ROOT`, as
+    `codex.json` does (finding 13 of the 2026-11-20 review). A skill added
+    later in the directory between the module and the root is a new match
+    under that level's own recorded pattern.
+    """
+
+    PATTERN = "$PROJECT/.agents/skills/*/SKILL.md"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.module = self.repo / "packages" / "mod"
+        self.module.mkdir(parents=True)
+        (self.repo / ".git").mkdir()
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["anchors"] = dict(
+            document["anchors"],
+            **{"$PROJECT": ["."], "$REPO_ROOT": ["$ancestor:.git"]},
+        )
+        document["probes"] = [
+            {"kind": "skill", "scope": "project", "glob": self.PATTERN,
+             "up_to": "$REPO_ROOT"}
+        ]
+        return document
+
+    def skill_at(self, root: Path, name: str) -> Path:
+        return self.write(root / ".agents" / "skills" / name / "SKILL.md", f"# {name}\n")
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update", str(ledger), "ledger", "--adapter", str(self.adapter_path),
+            "--project", str(self.module),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift_arguments(self, ledger: Path) -> list[str]:
+        return ["drift", str(ledger), "--adapter", str(self.adapter_path),
+                "--project", str(self.module)]
+
+    def test_a_skill_added_between_module_and_root_is_reported(self) -> None:
+        self.skill_at(self.module, "child")
+        self.skill_at(self.repo, "root")
+        ledger = self.capture()
+        self.skill_at(self.repo / "packages", "middle")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(
+            states["$REPO_ROOT/packages/.agents/skills/*/SKILL.md"],
+            ("DRIFTED", "appeared"),
+        )
+        self.assertEqual(states["$PROJECT/.agents/skills/child/SKILL.md"][0], "IN_PLACE")
+        self.assertEqual(states["$REPO_ROOT/.agents/skills/root/SKILL.md"][0], "IN_PLACE")
+
+    def test_an_unchanged_walk_is_in_place(self) -> None:
+        self.skill_at(self.module, "child")
+        self.skill_at(self.repo / "packages", "middle")
+        self.skill_at(self.repo, "root")
+        code, report, err = self.drift(self.capture())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+
+
+class BoundedWalkDriftTests(GlobFixture):
+    """Eve's review of 0.16.0: `drift` walks a skills root with the limits `scan` used.
+
+    Without them a skill seven levels down, or under a hidden directory, both
+    of which Codex never loads, would come back as configuration arriving.
+    """
+
+    PATTERN = "$PROJECT/.agents/skills/**/SKILL.md"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp / "proj"
+        self.project.mkdir()
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["anchors"] = dict(document["anchors"], **{"$PROJECT": ["."]})
+        document["probes"] = [
+            {"kind": "skill", "scope": "project", "glob": self.PATTERN,
+             "max_depth": 6, "skip_hidden": True}
+        ]
+        return document
+
+    def at(self, relative: str) -> Path:
+        return self.write(self.project / ".agents" / "skills" / relative / "SKILL.md", "# s\n")
+
+    def capture(self) -> Path:
+        ledger = self.write_ledger(self.valid_ledger())
+        code, _, err = self.run_cli(
+            "update", str(ledger), "ledger", "--adapter", str(self.adapter_path),
+            "--project", str(self.project),
+        )
+        self.assertIn(code, (0, 1), err)
+        return ledger
+
+    def drift_arguments(self, ledger: Path) -> list[str]:
+        return ["drift", str(ledger), "--adapter", str(self.adapter_path),
+                "--project", str(self.project)]
+
+    DEEP = "/".join(f"d{n}" for n in range(1, 8))
+
+    def test_what_codex_never_loads_is_not_an_arrival(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        self.at(self.DEEP)
+        self.at(".hidden/secret")
+        self.at("group/.cache/x")
+        code, report, err = self.drift(ledger)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["summary"].get("DRIFTED", 0), 0)
+
+    def test_a_nested_skill_that_codex_loads_is_an_arrival(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        self.at("group/beta")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(
+            states["$PROJECT/.agents/skills/group/beta/SKILL.md"], ("DRIFTED", "appeared")
+        )
+
+    def test_an_empty_root_stays_empty_for_what_codex_never_loads(self) -> None:
+        (self.project / ".agents" / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        self.at(".hidden/secret")
+        self.at(self.DEEP)
+        code, report, err = self.drift(ledger)
+        self.assertEqual(code, 0, err)
+        self.at("a/b")
+        code, report, _ = self.drift(ledger)
+        self.assertEqual(code, 1)
+        states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
+        self.assertEqual(states[self.PATTERN], ("DRIFTED", "appeared"))
+
+    def test_a_recorded_pattern_of_the_wrong_shape_is_reported_not_a_crash(
+        self,
+    ) -> None:
+        """Eve's second review of 0.16.0: limits recorded beside a pattern with
+        no name after `**` raised `IndexError` out of `drift`, and the report
+        of every other item was lost with it."""
+        from ledgerlib.paths import file_digest
+
+        self.at("group/alpha")
+        self.write(self.user_config / "kept.md", "# kept\n")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        broken = "$PROJECT/.agents/skills/**"
+        for item in items:
+            item["attributes"]["glob"] = broken
+        # A recorded absence of the same malformed shape, and one item with
+        # no pattern at all, which must still be classified.
+        items.append(
+            {
+                "kind": "skill",
+                "name": broken,
+                "anchor": "$PROJECT/.agents/other/**",
+                "digest": None,
+                "attributes": {
+                    "scope": "project",
+                    "reason": "no_match",
+                    "glob": "$PROJECT/.agents/other/**",
+                    "max_depth": 6,
+                    "skip_hidden": True,
+                },
+                "origin": "pre-existing",
+                "state": "not_present",
+                "portable": True,
+            }
+        )
+        items.append(
+            {
+                "kind": "skill",
+                "name": "kept.md",
+                "anchor": "$USER_CONFIG/kept.md",
+                "digest": file_digest(self.user_config / "kept.md"),
+                "attributes": {"scope": "user"},
+                "origin": "pre-existing",
+                "state": "present",
+                "portable": True,
+            }
+        )
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at("group/beta")
+        code, report, stderr = self.drift(ledger)
+        rows = {row["anchor"]: row for row in self.rows(report)}
+        self.assertEqual(
+            (rows["$PROJECT/.agents/other/**"]["state"], rows["$PROJECT/.agents/other/**"]["reason"]),
+            ("UNVERIFIABLE", "glob_failed"),
+        )
+        self.assertEqual(rows["$USER_CONFIG/kept.md"]["state"], "IN_PLACE")
+        self.assertIn("glob_failed", json.dumps(report) + stderr)
+        self.assertNotIn("$PROJECT/.agents/skills/group/beta/SKILL.md", rows)
+        self.assertIn(code, (0, 1))
+
+    def test_a_null_recorded_limit_is_unverifiable_not_dropped(self) -> None:
+        """Eve's third review of 0.16.0: `max_depth: null` read as absent, and the
+        walk lost its limit without a word."""
+        self.at("group/alpha")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"]["max_depth"] = None
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at(self.DEEP)
+        _code, report, stderr = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertFalse([row for row in rows if row["reason"] == "appeared"], rows)
+        self.assertIn("glob_failed", json.dumps(report) + stderr)
+
+    def test_malformed_recorded_limits_are_unverifiable_not_walked(self) -> None:
+        self.at("group/alpha")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"]["max_depth"] = "deep"
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at("group/beta")
+        code, report, stderr = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertFalse(
+            [row for row in rows if row["anchor"].endswith("group/beta/SKILL.md")], rows
+        )
+        self.assertIn("glob_failed", json.dumps(report) + stderr)

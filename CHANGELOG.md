@@ -2,6 +2,71 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.0 - 2026-11-23
+
+The last two medium findings of the independent review of 2026-11-20, both about how much the
+Skill and the scanner cover: a review that followed a link out of the package it was reviewing,
+and a Codex scan that saw one directory of a monorepo where the client loads several. Each was
+observed before it was changed, in isolated sessions, not only validated. Pull requests 55 and 56,
+and 58, 59 and 60 for the reviews of the release.
+
+- **The review stays inside the candidate bundle** (finding 11). `references/REVIEW.md` said to
+  open "every file it links", and nothing bounded where a link could lead. Observed on Claude Code
+  2.1.326 with `claude-opus-5-5`, three isolated sessions: every one opened the sibling folder's
+  file that the candidate links with `../../`, and quoted it. A new ground rule in `SKILL.md`
+  opens what the material points to only where it resolves to a regular file inside the copy
+  under review, links followed; a link, path or reference that resolves outside it is a finding,
+  named with where it points, and not opened. The rule bounds where the material can lead, not the
+  review's own steps: this Skill's references, a primary source chosen to check a claim, and the
+  read-only comparison with the user's setup stay separate, deliberate steps. The
+  data rule now tells text addressed to the reviewer (a finding) from instructions for after
+  adoption (what the package does, described and weighed). With the new text, three of three
+  sessions read the internal reference, reported the outside link unopened and concluded. New
+  eval case `SEC-005` with the critical check `stays_inside_candidate_bundle` and a workspace of
+  two disposable folders; the suite gains an optional `workspace` case field, validated and
+  described in `RUN_PROTOCOL.md`, where the trace records for each path whether the attempt was
+  denied, the file opened, or its content used, and the reviewer's own reads are graded apart from
+  the bundle's. 44 cases. The structural checks in CI do not run the case against a model. `docs/validation/review-inside-bundle-0.16.0.md` keeps
+  the structural checks apart from the observed sessions and states their limits;
+- **Codex project skills are read up to the repository root** (finding 13). Codex reads
+  `.agents/skills` in the working directory and in every directory above it up to the repository
+  root; `codex.json` probed the project directory alone. Observed on codex-cli 0.146.0 with
+  `skills/list` from an isolated app-server, no model invoked: from a module it listed the
+  module's, the intermediate directory's and the root's skills, both copies of a homonym, and
+  nothing above the root; a `.git` file marks the root as a `.git` directory does; with no `.git`
+  only the working directory is read. Adapters gain an anchor candidate `$ancestor:<name>` (the
+  nearest of the project and its parents holding that entry) and a probe field `up_to` (ask a
+  glob in every parent up to another anchor, each level recorded with its own pattern, so `drift`
+  re-asks each one). Inside each skills root Codex walks a tree, not one level (Eve's review): a
+  `SKILL.md` in the root or up to six directories below it, never under a directory whose name
+  starts with `.`, as codex-cli 0.146.0 listed and its loader's source states. Probes gain
+  `max_depth` and `skip_hidden` for a glob shaped `<prefix>/**/<name>`, recorded on each item so
+  `drift` walks the same way. `codex.json` declares `$REPO_ROOT` as `$ancestor:.git`, walks its
+  project skills probe up to it, probes its four skills roots as `**/SKILL.md` with those limits,
+  adds the skills Codex caches under `$USER_CONFIG/skills/.system` as their own `system` layer, and
+  is now `adapter_version` 3. Not matched: a symbolic link to a directory is not followed, where
+  Codex follows it in user and repository roots; Codex's limits on directories and entries per root
+  are not applied. **What changes for you:** a Codex scan
+  from a monorepo module records the skills above it under `$REPO_ROOT/...`; `drift` against a
+  Codex baseline captured before says the comparison crosses adapter versions, so capture a new
+  one. `project_root_markers` in Codex's configuration is not read; the adapter assumes `.git`.
+- **Boundaries kept after the scan** (Eve's second review). `drift` no longer reopens a path
+  `scan` refused: a match recorded `not_present` with a path-safety reason stays `UNVERIFIABLE`
+  with that reason, its bytes not hashed and its path not offered to open, where before its
+  stored form resolved inside another anchor and a regular file there read as `appeared`. A
+  pattern recorded as its own absence holds each new match to its anchor, as a pattern that
+  already matched did. `lock` leaves out an item whose recorded pattern, kind and scope are those
+  of a glob probe without `lockable`, so the `.system` cache stays out of `agent.lock` while a
+  system skill a lockable probe found stays in; elsewhere (literal `path` probes, `up_to` levels,
+  baselines without the pattern, a `scope` or `glob` that is not text) the kind decides, as
+  before, and such metadata no longer makes `lock` raise (Eve's third review). A recorded
+  `max_depth: null` is a malformed limit, not an absent one. A walk pattern of the wrong shape, from a hand-edited baseline,
+  is `glob_failed` instead of an `IndexError` that ended the report.
+
+No identifier, label or required field changed; a ledger written by 0.15.0 verifies and builds
+under 0.16.0. Each guard is proved by ablation, in new classes in `test_scan.py`,
+`test_adapters.py`, `test_drift.py`, `test_dashboard.py` and `evals/tests/test_eval_suite.py`.
+
 ## 0.15.0 - 2026-11-23
 
 Three medium findings of the independent review of 2026-11-20 about what the tool writes and where

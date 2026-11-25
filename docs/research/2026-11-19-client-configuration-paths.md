@@ -17,6 +17,7 @@ below names the page and the kind of evidence. Nothing here was carried over fro
 | **S** | Vendor documentation, but the fetch returned a model-written summary of that part of the page, not its raw text. Weaker than V |
 | **C** | The client's own source on its `main` branch, read on 2026-11-19, no commit pinned. Says what the code does, not what the vendor promises |
 | **D** | Confirmed on a live Windows installation, by file and key names only |
+| **O** | Observed in the client's own answer, with the version named in the row: added after the re-verification, by the release that relied on it |
 
 Claude Code pages are under `https://code.claude.com/docs/en/` and were fetched as markdown (the
 page name plus `.md`). None shows a "last updated" date. Codex pages are under
@@ -150,6 +151,9 @@ read in full). `claude plugin list --json` is mentioned (V `plugins/loading`).
 | `hooks.json` in `<codex-home>`, `<repo>/.codex/`, `/etc/codex/`, `%ProgramData%\OpenAI\Codex\` | V `hooks`, locations table |
 | `rules/*.rules` under `<codex-home>` and `<repo>/.codex/` | V `agent-configuration/rules`: "scans `rules/` under every active config layer" |
 | `agents/*.toml` under `<codex-home>` and `<repo>/.codex/` | V `agent-configuration/subagents` |
+| `.agents/skills` in the working directory and in every directory above it up to the repository root (0.16.0: `$REPO_ROOT` as `$ancestor:.git`, `up_to` on the project skills probe) | V `build-skills`; O codex-cli 0.146.0, `skills/list` from an isolated app-server on 2026-11-23, no model invoked: from a module it listed the module's, the intermediate directory's and the root's skills, both copies of a homonym with their own paths, nothing above the root; a `.git` file marked the root as a `.git` directory does; with no `.git` it listed the working directory's only. `project_root_markers` in `config.toml` can replace `.git` and is not read |
+| Inside every skills root (`<home>/.agents/skills`, `<codex-home>/skills`, `<repo>/.agents/skills` at each level, `/etc/codex/skills`), a recursive walk: `SKILL.md` in the root and up to six directories below, never under a hidden directory (0.16.0: `**/SKILL.md` with `max_depth` 6 and `skip_hidden`) | O codex-cli 0.146.0, `skills/list` on 2026-11-23: depths 0 to 6 listed, 7 and 8 not, nothing under `.hidden/` or `group/.cache/`, `node_modules/pkg` listed; C `codex-rs/core-skills/src/loader.rs` at tag `rust-v0.146.0` (`MAX_SCAN_DEPTH` 6, every root `Recursive`, `HiddenDirectoryPolicy::Skip`, directory links followed except in the system cache) |
+| `<codex-home>/skills/.system`, the skills Codex itself caches, a root of its own (0.16.0: probed, scope `system`, not lockable) | C `loader.rs` (`system_cache_root_dir`); O six such skills in an empty `CODEX_HOME` after one app-server start |
 | `[mcp_servers.<name>]` in the user and project `config.toml` | V `extend/mcp` |
 | `[plugins."<name>@<marketplace>"]` in the user and project `config.toml` | V `plugins/build/plugins.md` |
 | `/etc/codex/requirements.toml`, `%ProgramData%\OpenAI\Codex\requirements.toml` | S `enterprise/managed-configuration`; C `loader/mod.rs` |

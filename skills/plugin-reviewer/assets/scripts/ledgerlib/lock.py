@@ -110,7 +110,11 @@ def _by_key(entries: list[Mapping], *, side: str) -> dict[tuple, Mapping]:
     return indexed
 
 
-def _entries(baseline: Mapping, lockable: frozenset[str]) -> list[dict]:
+def _entries(
+    baseline: Mapping,
+    lockable: frozenset[str],
+    unpinned: frozenset[tuple[str, str | None, str]] = frozenset(),
+) -> list[dict]:
     rows: list[dict] = []
     items = baseline.get("items")
     for item in items if isinstance(items, list) else []:
@@ -121,6 +125,20 @@ def _entries(baseline: Mapping, lockable: frozenset[str]) -> list[dict]:
             continue
         attributes = item.get("attributes")
         scope = attributes.get("scope") if isinstance(attributes, Mapping) else None
+        pattern = attributes.get("glob") if isinstance(attributes, Mapping) else None
+        # `validate_ledger` asks only that `attributes` be an object, so either
+        # value can be a list or an object in an imported or hand-edited
+        # baseline, and an unhashable one made the lookup below raise
+        # `TypeError` out of `lock` and `lock --check` (Eve's third review of
+        # 0.16.0). Only text is a recorded pattern; anything else leaves the
+        # item pinnable by its kind, as before 0.16.0.
+        match_scope = scope if isinstance(scope, str) and scope.strip() else None
+        if isinstance(pattern, str) and (kind, match_scope, pattern) in unpinned:
+            # Found by a probe that is not lockable, though its kind is: the
+            # skills Codex caches under `.system` change with every client
+            # update and are no configuration of the user's (Eve's second
+            # review of 0.16.0).
+            continue
         rows.append(
             {
                 "kind": kind,
@@ -137,9 +155,18 @@ def _entries(baseline: Mapping, lockable: frozenset[str]) -> list[dict]:
 
 
 def build_lock(
-    ledger: Mapping, *, baseline_id: str, lockable: frozenset[str]
+    ledger: Mapping,
+    *,
+    baseline_id: str,
+    lockable: frozenset[str],
+    unpinned: frozenset[tuple[str, str | None, str]] = frozenset(),
 ) -> dict:
-    """Assemble the lockfile document from one baseline. Raises on an unknown id."""
+    """Assemble the lockfile document from one baseline. Raises on an unknown id.
+
+    `unpinned` is what `unpinned_patterns` returns for the adapter: items
+    whose kind is in `lockable` but whose pattern belongs to a probe that is
+    not, left out.
+    """
     baseline = _baseline(ledger, baseline_id)
     return {
         "lock_version": LOCK_VERSION,
@@ -150,7 +177,7 @@ def build_lock(
         # against a baseline from another, where whole anchors legitimately
         # do not exist.
         "platform": baseline.get("platform"),
-        "entries": _entries(baseline, lockable),
+        "entries": _entries(baseline, lockable, unpinned),
     }
 
 
@@ -165,7 +192,11 @@ def render_lock(document: Mapping) -> str:
 
 
 def check_lock(
-    locked: Mapping, ledger: Mapping, *, lockable: frozenset[str]
+    locked: Mapping,
+    ledger: Mapping,
+    *,
+    lockable: frozenset[str],
+    unpinned: frozenset[tuple[str, str | None, str]] = frozenset(),
 ) -> tuple[list[dict], int]:
     """Compare a lockfile against the baseline it was generated from.
 
@@ -195,7 +226,7 @@ def check_lock(
             )
 
     current = _by_key(
-        _entries(baseline, lockable), side=f"baseline {baseline_id!r}"
+        _entries(baseline, lockable, unpinned), side=f"baseline {baseline_id!r}"
     )
     pinned_entries = locked.get("entries")
     pinned = _by_key(
@@ -233,6 +264,38 @@ def lockable_kinds(adapter: Mapping) -> frozenset[str]:
         if isinstance(probe, Mapping)
         and probe.get("lockable") is True
         and isinstance(probe.get("kind"), str)
+    )
+
+
+def unpinned_patterns(adapter: Mapping) -> frozenset[tuple[str, str | None, str]]:
+    """`(kind, scope, glob)` of the probes that are not lockable though their kind is.
+
+    `lockable_kinds` reduces the adapter to a set of kinds, and one lockable
+    `skill` probe made every skill item pinnable, whichever probe found it:
+    the skills Codex caches in `$USER_CONFIG/skills/.system`, recorded by a
+    probe of their own without `lockable`, went into `agent.lock` and turned
+    every client update into a lock difference (Eve's second review of
+    0.16.0). Every glob item records the pattern that found it, so the
+    probe's eligibility can be applied to the item. A pattern that a lockable
+    probe of the same kind and scope also declares stays pinnable, so no
+    system skill declared lockable is dropped, and nothing is filtered by
+    scope alone.
+    """
+    probes = adapter.get("probes") if isinstance(adapter, Mapping) else None
+    probes = [p for p in (probes if isinstance(probes, list) else []) if isinstance(p, Mapping)]
+    kinds = lockable_kinds(adapter)
+
+    def triple(probe: Mapping) -> tuple[str, str | None, str] | None:
+        kind, scope, pattern = probe.get("kind"), probe.get("scope"), probe.get("glob")
+        if kind not in kinds or not isinstance(pattern, str):
+            return None
+        return (kind, scope if isinstance(scope, str) and scope.strip() else None, pattern)
+
+    pinned = {triple(p) for p in probes if p.get("lockable") is True}
+    return frozenset(
+        found
+        for found in (triple(p) for p in probes)
+        if found is not None and found not in pinned
     )
 
 
@@ -319,10 +382,13 @@ def lock_command(
             project=Path.cwd() if project is None else project,
         )
         lockable = lockable_kinds(selection["document"])
+        unpinned = unpinned_patterns(selection["document"])
 
         if check is not None:
             locked = load_json(check)
-            rows, code = check_lock(locked, document, lockable=lockable)
+            rows, code = check_lock(
+                locked, document, lockable=lockable, unpinned=unpinned
+            )
             for row in rows:
                 print(
                     f"{row['difference']}: {row.get('kind')} {row.get('anchor')}",
@@ -331,7 +397,9 @@ def lock_command(
             print(json.dumps(rows, indent=2, ensure_ascii=False))
             return code
 
-        built = build_lock(document, baseline_id=baseline_id, lockable=lockable)
+        built = build_lock(
+            document, baseline_id=baseline_id, lockable=lockable, unpinned=unpinned
+        )
         text = render_lock(built)
         if out is None:
             print(text, end="")
