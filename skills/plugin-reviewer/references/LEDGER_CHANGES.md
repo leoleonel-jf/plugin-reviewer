@@ -129,8 +129,13 @@ yields now and the capture does not hold is `UNVERIFIABLE`, `capture_incomplete`
 since it may have been there unseen. The items that capture did record keep their own comparison;
 a new, complete capture is what turns the rest into a verdict. A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it, and the evidence decides that
-one row, not the order of the patterns (0.17.1): it is `appeared` when any pattern that reaches it
-was captured completely, and `capture_incomplete` only when every one of them was partial. A match that went away is that item's `MISSING`, never a
+one row, not the order of the patterns (0.17.1). Among the patterns that already had matches, the
+vote is of those that return the path now, valid inside their anchor: it is `appeared` when one of
+them was captured completely, and `capture_incomplete` when every one of them was captured
+partially. A pattern that cannot be expanded now, or whose match is refused, gives no vote, and
+its failure is a finding of its own; one whose walk now misses a directory still votes for the
+paths it returns, since its capture listed the whole tree (0.17.2). A pattern recorded only as its
+own absence is answered by its own walk, as above. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the
 report lists those patterns in the baseline's `unenumerated` and says so on stderr, without
