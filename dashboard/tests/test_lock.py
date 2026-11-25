@@ -300,6 +300,20 @@ class ProbeProvenanceTests(unittest.TestCase):
             ["odd"],
         )
 
+    def test_a_recorded_probe_that_is_not_text_leaves_the_kind_to_decide(self) -> None:
+        """Eve's review of 0.17.0: a present `probe` that is not text fell back to
+        `glob`, and a present `scope: null` was read as absent; both could
+        exclude the item where the kind should decide."""
+        target = "$PROJECT/.agents/skills/*/SKILL.md"
+        self.assertEqual(
+            self.entries([
+                item("skill", "odd-probe", attributes={"probe": {"x": 1}, "glob": target}),
+                item("skill", "null-scope", attributes={"scope": None, "probe": target}),
+                item("skill", "absent-scope", attributes={"probe": target}),
+            ]),
+            ["null-scope", "odd-probe"],
+        )
+
     def test_the_recorded_probe_wins_over_the_glob(self) -> None:
         self.assertEqual(
             self.entries([

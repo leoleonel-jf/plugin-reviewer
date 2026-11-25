@@ -131,13 +131,18 @@ def _found_by_unpinned_probe(
     absent, which could match a probe declared without one (Eve's fourth
     review): the item stays pinnable by its kind.
     """
-    target = attributes.get("probe")
-    if not isinstance(target, str):
+    # Present means recorded: a `probe` that is there and not text does not
+    # fall back to `glob`, and a `scope` that is there and not text, `null`
+    # included, is not read as absent (Eve's review of 0.17.0). Either way
+    # the kind decides.
+    if "probe" in attributes:
+        target = attributes["probe"]
+    else:
         target = attributes.get("glob")
     if not isinstance(target, str):
         return False
     scope = attributes.get("scope")
-    if scope is not None and not isinstance(scope, str):
+    if "scope" in attributes and not isinstance(scope, str):
         return False
     scope = scope if isinstance(scope, str) and scope.strip() else None
     return (kind, scope, target) in unpinned
