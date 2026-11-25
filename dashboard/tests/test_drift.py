@@ -1958,6 +1958,79 @@ class BoundedWalkFactsTests(RecordedRefusalDriftTests):
     test_an_arrival_and_a_refusal_are_both_reported = None
 
 
+class OverlappingCoverageTests(GlobFixture):
+    """Eve's second review of 0.17.0: overlapping patterns of one kind and
+    scope, one captured partially and one completely, decide a new path by
+    the stronger evidence, not by which pattern sorts first."""
+
+    BROAD = "$USER_CONFIG/skills/*/SKILL.md"
+    NARROW = "$USER_CONFIG/skills/t*/SKILL.md"
+
+    def adapter_document(self) -> dict:
+        document = super().adapter_document()
+        document["probes"] = [
+            {"kind": "skill", "scope": "user", "glob": self.BROAD},
+            {"kind": "skill", "scope": "user", "glob": self.NARROW},
+        ]
+        return document
+
+    def capture_with_partial(self, partial: str) -> Path:
+        """A capture where only `partial`'s walk is recorded as incomplete."""
+        self.skill("tone")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        marked = [item for item in items if item["attributes"].get("glob") == partial]
+        others = [item for item in items if item["attributes"].get("glob") != partial]
+        # Both patterns matched, so each one is re-enumerated on its own.
+        self.assertTrue(marked and others, items)
+        for item in marked:
+            item["attributes"]["walk_incomplete"] = True
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        return ledger
+
+    def assert_the_complete_pattern_wins(self, partial: str) -> None:
+        ledger = self.capture_with_partial(partial)
+        self.skill("two")
+        code, report, _ = self.drift(ledger)
+        rows = [
+            (row["state"], row["reason"])
+            for row in self.rows(report)
+            if row["anchor"] == "$USER_CONFIG/skills/two/SKILL.md"
+        ]
+        self.assertEqual(rows, [("DRIFTED", "appeared")])
+        self.assertEqual(report["summary"].get("UNVERIFIABLE", 0), 0)
+        self.assertEqual(code, 1)
+
+    # The groups are classified in sorted order and BROAD sorts before
+    # NARROW, so the two tests put the partial group first and then last.
+    def test_the_complete_pattern_wins_when_the_partial_one_sorts_first(self) -> None:
+        self.assertLess(self.BROAD, self.NARROW)
+        self.assert_the_complete_pattern_wins(self.BROAD)
+
+    def test_the_complete_pattern_wins_when_the_partial_one_sorts_last(self) -> None:
+        self.assertLess(self.BROAD, self.NARROW)
+        self.assert_the_complete_pattern_wins(self.NARROW)
+
+    def test_a_path_only_partial_patterns_reach_stays_unverifiable(self) -> None:
+        # Control: when every pattern that reaches the path was partial, the
+        # stronger evidence is absent and the doubt is kept.
+        self.skill("tone")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        for item in document["baselines"][0]["items"]:
+            item["attributes"]["walk_incomplete"] = True
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.skill("two")
+        _code, report, _ = self.drift(ledger)
+        rows = [
+            (row["state"], row["reason"])
+            for row in self.rows(report)
+            if row["anchor"] == "$USER_CONFIG/skills/two/SKILL.md"
+        ]
+        self.assertEqual(rows, [("UNVERIFIABLE", "capture_incomplete")])
+
+
 class WalkUpDriftTests(GlobFixture):
     """0.16.0: `drift` re-asks every level a walking probe recorded.
 

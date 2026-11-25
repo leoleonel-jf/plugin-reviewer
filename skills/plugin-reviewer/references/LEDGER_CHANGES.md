@@ -128,7 +128,9 @@ absence is `UNVERIFIABLE`, `capture_incomplete`, whatever matches now, and a pat
 yields now and the capture does not hold is `UNVERIFIABLE`, `capture_incomplete`, not `appeared`,
 since it may have been there unseen. The items that capture did record keep their own comparison;
 a new, complete capture is what turns the rest into a verdict. A new path is new once, by kind,
-scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
+scope and anchor, however many of the adapter's patterns reach it, and the evidence decides that
+one row, not the order of the patterns (0.17.1): it is `appeared` when any pattern that reaches it
+was captured completely, and `capture_incomplete` only when every one of them was partial. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the
 report lists those patterns in the baseline's `unenumerated` and says so on stderr, without
