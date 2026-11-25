@@ -1728,6 +1728,86 @@ class BoundaryBeforeIdentityTests(GlobBoundaryTests):
     test_a_new_match_linked_inside_the_anchor_is_an_addition = None
 
 
+class RecordedRefusalDriftTests(GlobBoundaryTests):
+    """Eve's second review of 0.16.0: a refusal `scan` recorded is kept by `drift`.
+
+    `scan` stores a match it refused under the anchor its target resolves
+    into, so the stored form of a link from `$USER_CONFIG` into `$HOME` is a
+    well-formed `$HOME/...`. `drift` resolved that form and hashed the file
+    before looking at why the item was absent: it read bytes the scan had
+    refused and reported them as configuration that appeared. And a pattern
+    recorded as its own absence counted any match as an arrival, without the
+    boundary held to the matches of a pattern that already matched.
+    """
+
+    def reads(self) -> tuple[list[Path], object]:
+        """A `file_digest` that records every path `drift` hashes."""
+        from ledgerlib import drift as drift_module
+
+        seen: list[Path] = []
+        real = drift_module.file_digest
+
+        def spy(path: Path) -> str:
+            seen.append(Path(path).resolve())
+            return real(path)
+
+        return seen, mock.patch.object(drift_module, "file_digest", spy)
+
+    def test_a_recorded_refusal_is_not_reopened(self) -> None:
+        self.skill("one")
+        secret_dir = self.home / "secret-9d3a"
+        secret = self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        ledger = self.capture()
+        recorded = json.loads(ledger.read_text(encoding="utf-8"))["baselines"][0]["items"]
+        refused = [
+            item for item in recorded
+            if item["attributes"].get("reason") in PATH_SAFETY_REASONS
+        ]
+        self.assertEqual(len(refused), 1, recorded)
+        self.assertTrue(refused[0]["anchor"].startswith("$HOME/"), refused)
+        seen, patch = self.reads()
+        with patch:
+            code, report, _ = self.drift(ledger)
+        self.assertNotIn(secret.resolve(), seen)
+        rows = self.rows(report)
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+        row = next(row for row in rows if row["anchor"] == refused[0]["anchor"])
+        self.assertEqual(row["state"], "UNVERIFIABLE")
+        self.assertIn(row["reason"], PATH_SAFETY_REASONS)
+        self.assertIsNone(row["path"])
+        self.assertEqual(code, 1)
+
+    def test_an_empty_root_holds_its_matches_to_the_anchor(self) -> None:
+        (self.user_config / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        secret_dir = self.home / "secret-2f8b"
+        self.write(secret_dir / "SKILL.md", "outside the probe's anchor\n")
+        self.link(self.user_config / "skills" / "evil", secret_dir)
+        code, report, _ = self.drift(ledger)
+        rows = self.rows(report)
+        self.assertNotIn("secret-2f8b", json.dumps(report))
+        self.assertEqual(report["summary"]["DRIFTED"], 0, rows)
+        row = next(row for row in rows if row["anchor"] == self.PATTERN)
+        self.assertEqual(row["state"], "UNVERIFIABLE")
+        self.assertIn(row["reason"], PATH_SAFETY_REASONS)
+        self.assertEqual(code, 1)
+
+    def test_an_empty_root_still_reports_a_real_arrival(self) -> None:
+        (self.user_config / "skills").mkdir(parents=True)
+        ledger = self.capture()
+        self.skill("new")
+        code, report, _ = self.drift(ledger)
+        row = next(row for row in self.rows(report) if row["anchor"] == self.PATTERN)
+        self.assertEqual((row["state"], row["reason"]), ("DRIFTED", "appeared"))
+        self.assertEqual(code, 1)
+
+    # The inherited scenarios are about a pattern that already matched.
+    test_a_new_match_linked_into_another_anchor_is_refused = None
+    test_a_new_match_linked_outside_every_anchor_is_refused = None
+    test_a_new_match_linked_inside_the_anchor_is_an_addition = None
+
+
 class WalkUpDriftTests(GlobFixture):
     """0.16.0: `drift` re-asks every level a walking probe recorded.
 
@@ -1872,6 +1952,67 @@ class BoundedWalkDriftTests(GlobFixture):
         self.assertEqual(code, 1)
         states = {row["anchor"]: (row["state"], row["reason"]) for row in self.rows(report)}
         self.assertEqual(states[self.PATTERN], ("DRIFTED", "appeared"))
+
+    def test_a_recorded_pattern_of_the_wrong_shape_is_reported_not_a_crash(
+        self,
+    ) -> None:
+        """Eve's second review of 0.16.0: limits recorded beside a pattern with
+        no name after `**` raised `IndexError` out of `drift`, and the report
+        of every other item was lost with it."""
+        from ledgerlib.paths import file_digest
+
+        self.at("group/alpha")
+        self.write(self.user_config / "kept.md", "# kept\n")
+        ledger = self.capture()
+        document = json.loads(ledger.read_text(encoding="utf-8"))
+        items = document["baselines"][0]["items"]
+        broken = "$PROJECT/.agents/skills/**"
+        for item in items:
+            item["attributes"]["glob"] = broken
+        # A recorded absence of the same malformed shape, and one item with
+        # no pattern at all, which must still be classified.
+        items.append(
+            {
+                "kind": "skill",
+                "name": broken,
+                "anchor": "$PROJECT/.agents/other/**",
+                "digest": None,
+                "attributes": {
+                    "scope": "project",
+                    "reason": "no_match",
+                    "glob": "$PROJECT/.agents/other/**",
+                    "max_depth": 6,
+                    "skip_hidden": True,
+                },
+                "origin": "pre-existing",
+                "state": "not_present",
+                "portable": True,
+            }
+        )
+        items.append(
+            {
+                "kind": "skill",
+                "name": "kept.md",
+                "anchor": "$USER_CONFIG/kept.md",
+                "digest": file_digest(self.user_config / "kept.md"),
+                "attributes": {"scope": "user"},
+                "origin": "pre-existing",
+                "state": "present",
+                "portable": True,
+            }
+        )
+        ledger.write_text(json.dumps(document), encoding="utf-8")
+        self.at("group/beta")
+        code, report, stderr = self.drift(ledger)
+        rows = {row["anchor"]: row for row in self.rows(report)}
+        self.assertEqual(
+            (rows["$PROJECT/.agents/other/**"]["state"], rows["$PROJECT/.agents/other/**"]["reason"]),
+            ("UNVERIFIABLE", "glob_failed"),
+        )
+        self.assertEqual(rows["$USER_CONFIG/kept.md"]["state"], "IN_PLACE")
+        self.assertIn("glob_failed", json.dumps(report) + stderr)
+        self.assertNotIn("$PROJECT/.agents/skills/group/beta/SKILL.md", rows)
+        self.assertIn(code, (0, 1))
 
     def test_malformed_recorded_limits_are_unverifiable_not_walked(self) -> None:
         self.at("group/alpha")

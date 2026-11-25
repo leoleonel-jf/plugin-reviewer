@@ -99,14 +99,23 @@ in-file absence recorded by a baseline that predates the recorded pointer is `UN
 `no_match` item *without* a recorded pointer is a literal, wildcard-free glob that matched
 nothing, and for that item the file appearing is exactly the drift it looks like.
 
+A match `scan` refused at the boundary of its probe's anchor is recorded `not_present` with the
+refusal as its reason, under the anchor its target resolves into. `drift` keeps that refusal: the
+item is `UNVERIFIABLE` with the same reason, its path is neither resolved, hashed nor offered to
+open, and a new capture is what can change it (0.16.0). Before, the stored form resolved inside
+the other anchor, its bytes were hashed, and a regular file there read as `appeared`. A recorded
+pattern whose walk limits sit beside a shape other than `<prefix>/**/<name>` is `UNVERIFIABLE`,
+`glob_failed`, and the report of every other item goes on.
+
 A glob that matched something is asked again. Every item a glob probe produced carries the
 pattern in `attributes.glob` (from 0.14.0), and `drift` expands it once more: a path it yields
 now that the baseline does not hold is one row, `DRIFTED`, `appeared`, beside the recorded
 matches, which keep their own states. A match is held to the anchor its pattern names, as `scan`
 holds it: one that resolves outside it, into another anchor or none, is one `UNVERIFIABLE` row
 naming the pattern and the reason, never the path it reached, even when another probe recorded
-that path. That boundary applies to a pattern that already matched; a pattern recorded as its own
-absence reports any match as `appeared` under the pattern's name. A new path is new once, by kind,
+that path. A pattern recorded as its own absence is held to the same boundary: a match inside the
+anchor is `appeared` under the pattern's name, and one that resolves outside it is
+`UNVERIFIABLE` with the reason, its path not reported (0.16.0). A new path is new once, by kind,
 scope and anchor, however many of the adapter's patterns reach it. A match that went away is that item's `MISSING`, never a
 second row. A baseline from before 0.14.0 holds the matches and not the pattern, so a second
 match under a pattern that already had one cannot be told from configuration nobody probed: the

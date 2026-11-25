@@ -8,7 +8,7 @@ The last two medium findings of the independent review of 2026-11-20, both about
 Skill and the scanner cover: a review that followed a link out of the package it was reviewing,
 and a Codex scan that saw one directory of a monorepo where the client loads several. Each was
 observed before it was changed, in isolated sessions, not only validated. Pull requests 55 and 56,
-and 58 for the review of the release.
+and 58 and 59 for the reviews of the release.
 
 - **The review stays inside the candidate bundle** (finding 11). `references/REVIEW.md` said to
   open "every file it links", and nothing bounded where a link could lead. Observed on Claude Code
@@ -50,6 +50,15 @@ and 58 for the review of the release.
   from a monorepo module records the skills above it under `$REPO_ROOT/...`; `drift` against a
   Codex baseline captured before says the comparison crosses adapter versions, so capture a new
   one. `project_root_markers` in Codex's configuration is not read; the adapter assumes `.git`.
+- **Boundaries kept after the scan** (Eve's second review). `drift` no longer reopens a path
+  `scan` refused: a match recorded `not_present` with a path-safety reason stays `UNVERIFIABLE`
+  with that reason, its bytes not hashed and its path not offered to open, where before its
+  stored form resolved inside another anchor and a regular file there read as `appeared`. A
+  pattern recorded as its own absence holds each new match to its anchor, as a pattern that
+  already matched did. `lock` applies a probe's `lockable` to the items that probe found, by the
+  pattern they record, so the `.system` cache stays out of `agent.lock` while a system skill a
+  lockable probe found stays in. A walk pattern of the wrong shape, from a hand-edited baseline,
+  is `glob_failed` instead of an `IndexError` that ended the report.
 
 No identifier, label or required field changed; a ledger written by 0.15.0 verifies and builds
 under 0.16.0. Each guard is proved by ablation, in new classes in `test_scan.py`,
