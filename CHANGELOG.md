@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.17.1 - 2026-11-25
+
+The reservation Eve's second review of 0.17.0 left for the next pull request.
+
+- **Overlapping patterns decide a new path by the evidence, not by their order.** In a custom
+  adapter, two globs of one kind and scope that already had matches can reach the same new path.
+  When the baseline recorded one as partial (`walk_incomplete`) and the other as complete, `drift`
+  kept the row of whichever pattern sorted first, so a partial pattern could leave
+  `capture_incomplete` where the complete one shows an arrival. The path is now `appeared` when any
+  pattern that reaches it was captured completely, and `UNVERIFIABLE`, `capture_incomplete`, only
+  when every one of them was partial. Tested with the partial pattern sorting first and last. The
+  bundled adapters are not affected.
+
+No identifier, label or required field changed; a ledger written by 0.17.0 verifies and builds
+under 0.17.1. The guard is proved by ablation.
+
 ## 0.17.0 - 2026-11-24
 
 The follow-ups Eve's reviews of 0.16.0 set aside for after that release: what the lock pins, what a
