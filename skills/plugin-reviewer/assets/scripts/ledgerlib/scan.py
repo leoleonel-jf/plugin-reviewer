@@ -470,9 +470,13 @@ def walk_options(source: object) -> tuple[int | None, bool] | None:
     return (max_depth, skip_hidden)
 
 
+_ESCAPED = re.compile(r"\[([*?\[])\]")
+_WILDCARD = re.compile(r"[*?\[]")
+
+
 def _unescape(segment: str) -> str:
     """Undo `glob.escape` on one segment: `[[]` -> `[`, `[*]` -> `*`, `[?]` -> `?`."""
-    return re.sub(r"\[([*?\[])\]", r"\1", segment)
+    return _ESCAPED.sub(r"\1", segment)
 
 
 def expand_glob(
@@ -496,6 +500,27 @@ def expand_glob(
     if max_depth is None and not skip_hidden:
         return list(root.glob(tail))
     parts = tail.split("/")
+    # The shape is checked here as well as in `validate_adapter`: a baseline
+    # reopened by `drift` carries the pattern and the limits as ledger
+    # content, and a pattern with no name after `**`, or a wildcard anywhere
+    # else, would otherwise raise `IndexError` in the middle of a report
+    # (Eve's second review of 0.16.0). `ValueError` is what every caller
+    # already turns into `glob_failed`. An escaped character (`[[]`, as
+    # `_walk_up` writes a directory name) is a literal, not a wildcard.
+    if (
+        parts.count("**") != 1
+        or parts.index("**") != len(parts) - 2
+        or not parts[-1]
+        or any(
+            _WILDCARD.search(_ESCAPED.sub("", part))
+            for part in parts
+            if part != "**"
+        )
+    ):
+        raise ValueError(
+            "a walk with max_depth or skip_hidden needs a pattern shaped "
+            f"<prefix>/**/<name> with no other wildcard: {tail!r}"
+        )
     star = parts.index("**")
     prefix = [_unescape(part) for part in parts[:star]]
     name = _unescape(parts[star + 1])

@@ -12,8 +12,9 @@ change, and keeps it apart from the structural checks.
   guards in `ReadInsideThePackageTests`. They prove the case and the rule exist. They do not prove a
   model obeys either, and the validator does not classify a recorded read: that is the grader's
   job under `RUN_PROTOCOL.md`.
-- **Observed, once, below.** Six isolated sessions. The suite as a campaign with a grader has not
-  been run; nothing here is a pass rate.
+- **Observed, once, below.** Nine isolated sessions: three before and three after in the first
+  bench, three more after Eve's first review. The suite as a campaign with a grader has not been
+  run; nothing here is a pass rate.
 
 ## Setup
 
@@ -46,17 +47,21 @@ verdicts were reasonable: the defect is where the reading went, not what it conc
 session named `SKILL.md:11` as a dependency the package does not ship, said where it would resolve
 once installed, said it had not opened the file, and gave its verdict.
 
-In all six sessions the agent also tried a `Glob` under the user's configuration directory to compare
+In all nine sessions the agent also tried a `Glob` under the user's configuration directory to compare
 with the installed setup (step 5 of the review). Permission mode `default` without prompts denied it;
 it is the documented step, not the outside reference. The rule bounds where the candidate's own
-references lead; the Skill's references (here `references/REVIEW.md`, read in all six), a primary
+references lead; the Skill's references (here `references/REVIEW.md`, read in all nine), a primary
 source chosen to check a claim, and this comparison are separate steps, and `SEC-005` grades them
-apart from the bundle. A denied attempt is not an opening: none of the six read anything under that
+apart from the bundle. A denied attempt is not an opening: none of the nine read anything under that
 directory, and its content reached no answer.
 
 ## Limits
 
 - One client, one model, three sessions per arm. Codex and other models were not observed.
+- The "Opened" columns count the `Read`, `Glob` and `Grep` calls the transcript records on
+  that path, not the result of each call. In these nine sessions the only refusals recorded were
+  the `Glob` calls under the user's configuration directory above, and the marker in the answer
+  is what shows the content was used.
 - A symbolic link inside the bundle that points outside was not exercised; the rule covers it in
   words ("links followed"), and no session met one.
 - The scripts and raw transcripts stay outside the repository (`.agent-audit/`), as for earlier

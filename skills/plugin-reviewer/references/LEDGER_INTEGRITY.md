@@ -43,6 +43,11 @@ Only kinds an adapter marks `lockable` are pinned — the ones naming an install
 permission rules and environment variable names are deliberately left out: a lockfile that fails
 CI because somebody edited `CLAUDE.md` is one somebody switches off in the first week.
 
+The test is the probe's, not only its kind's: an item found by a probe without `lockable` stays out
+even when another probe of its kind is lockable, by the pattern the item records. The skills Codex
+caches under `$USER_CONFIG/skills/.system` are probed that way and never pinned; a system skill
+found by a lockable probe, such as `$SYSTEM_CONFIG/skills`, is (0.16.0).
+
 A lockfile carries no timestamp and no absolute path, so two machines with the same configuration
 produce identical bytes. A mismatched `client` or `platform` is refused outright rather than
 compared, because comparing across either would report every entry as both added and removed.

@@ -3540,6 +3540,111 @@ class CodexSkillTreeTests(CodexNestedProjectSkillTests):
             },
         )
 
+    def lock_entries(self, items: list[dict]) -> list[dict]:
+        """`lock` run as the command runs it, with the bundled Codex adapter."""
+        from ledgerlib.lock import lock_command
+
+        ledger = self.tmp / "ledger.json"
+        ledger.write_text(
+            json.dumps(
+                {
+                    "client": "codex",
+                    "baselines": [
+                        {
+                            "id": "BASE-2026-000",
+                            "client": "codex",
+                            "adapter_version": 3,
+                            "platform": sys.platform,
+                            "items": items,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = lock_command(
+                ledger=ledger,
+                baseline_id="BASE-2026-000",
+                check=None,
+                out=None,
+                force=False,
+                adapter=ADAPTERS_DIR / "codex.json",
+                project=self.tmp,
+            )
+        self.assertEqual(code, 0)
+        return json.loads(out.getvalue())["entries"]
+
+    def test_the_cached_system_skills_stay_out_of_the_lock(self) -> None:
+        """Eve's second review of 0.16.0: one lockable `skill` probe made every
+        skill pinnable, so the `.system` cache, which changes with each client
+        update, went into `agent.lock`. The user's skill goes in, the cache
+        does not, and a system skill a lockable probe found still does."""
+        cached = self.codex_home / "skills" / ".system" / "imagegen" / "SKILL.md"
+        cached.parent.mkdir(parents=True)
+        cached.write_text("---\nname: imagegen\ndescription: x\n---\n", encoding="utf-8")
+        user = self.codex_home / "skills" / "mine" / "SKILL.md"
+        user.parent.mkdir(parents=True)
+        user.write_text("---\nname: mine\ndescription: x\n---\n", encoding="utf-8")
+        project = self.tmp / "project"
+        project.mkdir()
+        items = self.scan_from(project)["items"]
+        self.assertIn(
+            "$USER_CONFIG/skills/.system/imagegen/SKILL.md",
+            [item["anchor"] for item in items],
+        )
+        # A system skill found by the lockable `$SYSTEM_CONFIG` probe, as a
+        # baseline from Linux records it (no fixture can write /etc/codex).
+        items.append(
+            {
+                "kind": "skill",
+                "name": "SKILL.md",
+                "anchor": "$SYSTEM_CONFIG/skills/admin/SKILL.md",
+                "digest": "sha256:" + "b" * 64,
+                "attributes": {
+                    "scope": "system",
+                    "glob": "$SYSTEM_CONFIG/skills/**/SKILL.md",
+                    "max_depth": 6,
+                    "skip_hidden": True,
+                },
+                "origin": "pre-existing",
+                "state": "present",
+                "portable": True,
+            }
+        )
+        pinned = sorted(
+            entry["anchor"]
+            for entry in self.lock_entries(items)
+            if entry["kind"] == "skill" and entry["state"] == "present"
+        )
+        self.assertEqual(
+            pinned,
+            [
+                "$SYSTEM_CONFIG/skills/admin/SKILL.md",
+                "$USER_CONFIG/skills/mine/SKILL.md",
+            ],
+        )
+
+    def test_unpinned_patterns_name_the_cache_probe_alone(self) -> None:
+        from ledgerlib.lock import unpinned_patterns
+
+        adapter = json.loads((ADAPTERS_DIR / "codex.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            unpinned_patterns(adapter),
+            {("skill", "system", "$USER_CONFIG/skills/.system/**/SKILL.md")},
+        )
+        # A pattern a lockable probe also declares stays pinnable.
+        adapter["probes"].append(
+            {
+                "kind": "skill",
+                "scope": "system",
+                "glob": "$USER_CONFIG/skills/.system/**/SKILL.md",
+                "lockable": True,
+            }
+        )
+        self.assertEqual(unpinned_patterns(adapter), frozenset())
+
     def test_a_link_to_a_directory_is_not_followed(self) -> None:
         repo = self.tmp / "repo"
         repo.mkdir()
@@ -3577,6 +3682,25 @@ class CodexSkillTreeTests(CodexNestedProjectSkillTests):
 
 class MalformedWalkLimitTests(unittest.TestCase):
     """A hand-built probe with malformed limits is recorded, not walked without them."""
+
+    def test_a_walk_refuses_a_pattern_of_the_wrong_shape(self) -> None:
+        """Eve's second review of 0.16.0: the shape is checked where the walk
+        happens, since `drift` reopens patterns no adapter validation saw."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "skills" / "x").mkdir(parents=True)
+            for tail in ("skills/**", "skills/**/", "skills/*/**/SKILL.md",
+                         "**/a/**/SKILL.md", "skills/**/SKILL*", "skills/SKILL.md"):
+                with self.subTest(tail=tail):
+                    with self.assertRaises(ValueError):
+                        scan_module.expand_glob(root, tail, 6, True)
+            # A name escaped the way `_walk_up` writes it is a literal.
+            (root / "a[1]" / "skills" / "x" / "SKILL.md").parent.mkdir(parents=True)
+            (root / "a[1]" / "skills" / "x" / "SKILL.md").write_text("x", encoding="utf-8")
+            self.assertEqual(
+                scan_module.expand_glob(root, "a[[]1]/skills/**/SKILL.md", 6, True),
+                [root / "a[1]" / "skills" / "x" / "SKILL.md"],
+            )
 
     def test_a_malformed_limit_is_a_malformed_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
